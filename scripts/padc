@@ -1,0 +1,48 @@
+#!/bin/bash
+# Simple PADC client - sends commands to daemon via FIFO
+
+# Resolve symlinks to get the real script location
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+FIFO="/tmp/padc.fifo"
+
+# Check if FIFO exists
+if [[ ! -p "$FIFO" ]]; then
+    echo "Error: Daemon not running (FIFO not found)"
+    echo "Start the daemon with: padcd start"
+    exit 1
+fi
+
+# Send command to FIFO
+case "${1:-toggle}" in
+    start|stop|toggle|toggle-paste|toggle-insert|toggle-insert-enter)
+        echo "$1" > "$FIFO"
+        ;;
+    help|--help|-h)
+        echo "PADC - Voice to Text Tool"
+        echo ""
+        echo "Usage: $0 [COMMAND]"
+        echo ""
+        echo "Commands:"
+        echo "  toggle           Toggle recording (default, copy to clipboard)"
+        echo "  toggle-paste     Toggle recording and type text with xdotool"
+        echo "  toggle-insert    Toggle recording and paste with Shift+Insert"
+        echo "  toggle-insert-enter  Toggle recording, paste with Shift+Insert, then Enter"
+        echo "  start            Start recording"
+        echo "  stop             Stop recording"
+        echo ""
+        echo "Daemon management:"
+        echo "  Use 'padcd' to manage the daemon (start/stop/restart/status/logs)"
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Use '$0 help' for available commands"
+        exit 1
+        ;;
+esac
