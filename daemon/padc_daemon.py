@@ -122,6 +122,23 @@ class PaDCDaemon:
         threading.Thread(target=self._transcribe, daemon=True).start()
         return "processing"
 
+    def cancel_recording(self):
+        """Cancel recording without transcribing"""
+        if self.state != State.RECORDING:
+            return "not_recording"
+
+        # Stop recording but don't save the audio
+        self.recorder.stop()
+        self.state = State.IDLE
+        self.audio_buffer = None
+        self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
+        
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Recording cancelled",
+            flush=True,
+        )
+        return "recording_cancelled"
+
     def _transcribe(self):
         """Transcribe audio in background thread"""
         try:
@@ -291,6 +308,8 @@ class PaDCDaemon:
             return self.start_recording()
         elif cmd == "stop":
             return self.stop_recording()
+        elif cmd == "cancel":
+            return self.cancel_recording()
         elif cmd == "status":
             return self.status()
         elif cmd == "shutdown":

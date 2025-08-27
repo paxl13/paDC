@@ -154,6 +154,39 @@ def start(
 
 
 @app.command()
+def cancel():
+    """Cancel recording without transcribing"""
+    if not PID_FILE.exists():
+        typer.echo("No daemon running", err=True)
+        raise typer.Exit(1)
+
+    try:
+        pid = int(PID_FILE.read_text())
+        os.kill(pid, signal.SIGTERM)
+        typer.echo("Recording cancelled")
+
+        time.sleep(0.5)
+
+        # Clean up files without transcribing
+        if AUDIO_FILE.exists():
+            AUDIO_FILE.unlink()
+        
+        adapter_file = Path("/tmp/padc_adapter.txt")
+        if adapter_file.exists():
+            adapter_file.unlink()
+
+        PID_FILE.unlink()
+
+    except ProcessLookupError:
+        typer.echo("Daemon process not found", err=True)
+        PID_FILE.unlink()
+        raise typer.Exit(1)
+    except Exception as e:
+        typer.echo(f"Error cancelling daemon: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def stop(
     paste: bool = typer.Option(
         False, "--paste", "-p", help="Also type the text using xdotool"

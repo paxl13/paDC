@@ -21,7 +21,7 @@ fi
 
 # Send command to FIFO
 case "${1:-toggle}" in
-    start|stop|toggle|toggle-paste|toggle-insert|toggle-insert-enter)
+    start|stop|cancel|toggle|toggle-paste|toggle-insert|toggle-insert-enter)
         echo "$1" > "$FIFO"
         ;;
     help|--help|-h)
@@ -36,6 +36,7 @@ case "${1:-toggle}" in
         echo "  toggle-insert-enter  Toggle recording, paste with Shift+Insert, then Enter"
         echo "  start            Start recording"
         echo "  stop             Stop recording"
+        echo "  cancel           Cancel current recording without transcribing"
         echo ""
         echo "Daemon management:"
         echo "  Use 'padcd' to manage the daemon (start/stop/restart/status/logs)"
