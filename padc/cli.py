@@ -170,7 +170,7 @@ def cancel():
         # Clean up files without transcribing
         if AUDIO_FILE.exists():
             AUDIO_FILE.unlink()
-        
+
         adapter_file = Path("/tmp/padc_adapter.txt")
         if adapter_file.exists():
             adapter_file.unlink()

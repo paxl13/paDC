@@ -132,7 +132,7 @@ class PaDCDaemon:
         self.state = State.IDLE
         self.audio_buffer = None
         self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
-        
+
         print(
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Recording cancelled",
             flush=True,
