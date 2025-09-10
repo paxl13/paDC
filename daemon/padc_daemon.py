@@ -24,6 +24,7 @@ load_dotenv()
 FIFO_PATH = Path("/tmp/padc.fifo")
 PID_FILE = Path("/tmp/padc_daemon.pid")
 LOG_FILE = Path("/tmp/padc_daemon.log")
+STATUS_FILE = Path.home() / ".padc_status"
 
 
 class State(Enum):
@@ -46,6 +47,10 @@ class PaDCDaemon:
         self.adapter = None
         self.running = True
         self.recording_mode = RecordingMode.NORMAL
+        self.is_processing = False  # Track processing state
+
+        # Initialize status file
+        self._update_status_file()
 
         # Initialize adapter once (heavy operation)
         self._init_adapter()
@@ -99,12 +104,26 @@ class PaDCDaemon:
             )
             self.adapter = FasterWhisperAdapter(model_size="base")
 
+    def _update_status_file(self):
+        """Update status file for tmux status bar"""
+        try:
+            if self.is_processing:
+                status = "processing"
+            elif self.state == State.RECORDING:
+                status = "recording"
+            else:
+                status = ""
+            STATUS_FILE.write_text(status)
+        except Exception:
+            pass  # Silently fail if can't write status file
+
     def start_recording(self):
         """Start recording audio"""
         if self.state == State.RECORDING:
             return "already_recording"
 
         self.state = State.RECORDING
+        self._update_status_file()
         self.recorder.start(play_chime=True)
         print(f"[{time.strftime('%H:%M:%S')}] Recording started... ", end="", flush=True)
         return "recording_started"
@@ -117,6 +136,8 @@ class PaDCDaemon:
         # Get audio from memory
         self.audio_buffer = self.recorder.stop()
         self.state = State.IDLE
+        self.is_processing = True
+        self._update_status_file()
         self.processing_start_time = time.time()  # Track when processing started
         
         # Update the same line with processing message
@@ -134,6 +155,7 @@ class PaDCDaemon:
         # Stop recording but don't save the audio
         self.recorder.stop()
         self.state = State.IDLE
+        self._update_status_file()
         self.audio_buffer = None
         self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
 
@@ -189,6 +211,8 @@ class PaDCDaemon:
         finally:
             self.audio_buffer = None
             self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
+            self.is_processing = False
+            self._update_status_file()
 
     def _paste_with_xdotool(self, text):
         """Type text using xdotool"""
@@ -264,6 +288,11 @@ class PaDCDaemon:
             os.unlink(FIFO_PATH)
         if PID_FILE.exists():
             os.unlink(PID_FILE)
+        # Clear status file on shutdown
+        try:
+            STATUS_FILE.write_text("")
+        except Exception:
+            pass
 
         sys.exit(0)
 
