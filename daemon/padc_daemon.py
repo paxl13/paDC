@@ -62,7 +62,7 @@ class PaDCDaemon:
         )
 
         print(
-            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Loading {adapter_type} adapter with {model_size} model..."
+            f"[{time.strftime('%H:%M:%S')}] Loading {adapter_type} adapter with {model_size} model..."
         )
 
         try:
@@ -84,18 +84,18 @@ class PaDCDaemon:
                     self.adapter = OpenAIAdapter(api_key=api_key)
                 else:
                     print(
-                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No OpenAI key, falling back to local"
+                        f"[{time.strftime('%H:%M:%S')}] No OpenAI key, falling back to local"
                     )
                     self.adapter = FasterWhisperAdapter(model_size=model_size)
             else:  # local
                 self.adapter = FasterWhisperAdapter(model_size=model_size)
 
             print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Adapter loaded: {self.adapter.__class__.__name__}"
+                f"[{time.strftime('%H:%M:%S')}] Adapter loaded: {self.adapter.__class__.__name__}"
             )
         except Exception as e:
             print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to load adapter: {e}, using fallback"
+                f"[{time.strftime('%H:%M:%S')}] Failed to load adapter: {e}, using fallback"
             )
             self.adapter = FasterWhisperAdapter(model_size="base")
 
@@ -106,6 +106,7 @@ class PaDCDaemon:
 
         self.state = State.RECORDING
         self.recorder.start(play_chime=True)
+        print(f"[{time.strftime('%H:%M:%S')}] Recording started... ", end="", flush=True)
         return "recording_started"
 
     def stop_recording(self):
@@ -117,6 +118,9 @@ class PaDCDaemon:
         self.audio_buffer = self.recorder.stop()
         self.state = State.IDLE
         self.processing_start_time = time.time()  # Track when processing started
+        
+        # Update the same line with processing message
+        print("processing", end="", flush=True)
 
         # Process in background
         threading.Thread(target=self._transcribe, daemon=True).start()
@@ -133,17 +137,15 @@ class PaDCDaemon:
         self.audio_buffer = None
         self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
 
-        print(
-            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Recording cancelled",
-            flush=True,
-        )
+        # Complete the same line that started with "Recording started..."
+        print("cancelled", flush=True)
         return "recording_cancelled"
 
     def _transcribe(self):
         """Transcribe audio in background thread"""
         try:
             if self.audio_buffer is None or self.audio_buffer.size == 0:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No audio captured")
+                print("... no audio captured", flush=True)
                 return
 
             # Save to temporary file (adapters need file path for now)
@@ -166,26 +168,24 @@ class PaDCDaemon:
                     pyperclip.copy(text)
 
                 total_time = time.time() - self.processing_start_time
-                print(
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Transcribed ({total_time:.2f}s): {text}",
-                    flush=True,
-                )
-
+                
                 # Handle paste/insert modes
                 if self.recording_mode == RecordingMode.PASTE:
                     self._paste_with_xdotool(text)
+                    print(f"... transcribed ({total_time:.2f}s)\n ✓ Typed: {text}", flush=True)
                 elif self.recording_mode == RecordingMode.INSERT:
-                    self._insert_with_xdotool()
+                    self._insert_with_xdotool(text)
+                    print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
                 elif self.recording_mode == RecordingMode.INSERT_ENTER:
-                    self._insert_enter_with_xdotool()
+                    self._insert_enter_with_xdotool(text)
+                    print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted+Enter: {text}", flush=True)
+                else:
+                    print(f"... transcribed ({total_time:.2f}s):\n ✓ Copied{text}", flush=True)
             else:
-                print(
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No speech detected",
-                    flush=True,
-                )
+                print("... no speech detected", flush=True)
 
         except Exception as e:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Transcription error: {e}")
+            print(f"... transcription error: {e}", flush=True)
         finally:
             self.audio_buffer = None
             self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
@@ -194,61 +194,36 @@ class PaDCDaemon:
         """Type text using xdotool"""
         try:
             import subprocess
-
             subprocess.run(["xdotool", "type", text], check=True)
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Typed with xdotool",
-                flush=True,
-            )
         except subprocess.CalledProcessError:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to type with xdotool")
+            pass  # Error will be handled in calling function
         except FileNotFoundError:
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] xdotool not found - install it for paste functionality"
-            )
+            pass  # Error will be handled in calling function
 
-    def _insert_with_xdotool(self):
+    def _insert_with_xdotool(self, text):
         """Paste using Shift+Insert"""
         try:
             import subprocess
-
             subprocess.run(["xdotool", "key", "shift+Insert"], check=True)
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Pasted with Shift+Insert",
-                flush=True,
-            )
         except subprocess.CalledProcessError:
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to paste with xdotool"
-            )
+            pass  # Error will be handled in calling function
         except FileNotFoundError:
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] xdotool not found - install it for insert functionality"
-            )
+            pass  # Error will be handled in calling function
 
-    def _insert_enter_with_xdotool(self):
+    def _insert_enter_with_xdotool(self, text):
         """Paste using Shift+Insert, then press Enter"""
         try:
             import subprocess
-
             # First paste with Shift+Insert
             subprocess.run(["xdotool", "key", "shift+Insert"], check=True)
             # Small delay to ensure text is pasted
             time.sleep(0.1)
             # Then press Enter
             subprocess.run(["xdotool", "key", "Return"], check=True)
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✓ Pasted with Shift+Insert and pressed Enter",
-                flush=True,
-            )
         except subprocess.CalledProcessError:
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to paste and enter with xdotool"
-            )
+            pass  # Error will be handled in calling function
         except FileNotFoundError:
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] xdotool not found - install it for insert-enter functionality"
-            )
+            pass  # Error will be handled in calling function
 
     def toggle(self):
         """Toggle recording state"""
@@ -279,7 +254,7 @@ class PaDCDaemon:
 
     def shutdown(self):
         """Shutdown daemon"""
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Shutting down daemon...")
+        print(f"[{time.strftime('%H:%M:%S')}] Shutting down daemon...")
         self.running = False
         if self.state == State.RECORDING:
             self.recorder.stop()
@@ -328,11 +303,11 @@ class PaDCDaemon:
         os.mkfifo(FIFO_PATH)
 
         print(
-            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] paDC daemon started (PID: {os.getpid()})",
+            f"[{time.strftime('%H:%M:%S')}] paDC daemon started (PID: {os.getpid()})",
             flush=True,
         )
         print(
-            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Listening on {FIFO_PATH}",
+            f"[{time.strftime('%H:%M:%S')}] Listening on {FIFO_PATH}",
             flush=True,
         )
 
@@ -345,16 +320,17 @@ class PaDCDaemon:
                             break
 
                         response = self.process_command(line)
-                        if response:
+                        if response and response not in ["recording_started", "processing", "recording_cancelled"]:
+                            # Only print non-recording status messages since those are handled inline
                             print(
-                                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Response: {response}",
+                                f"[{time.strftime('%H:%M:%S')}] {response}",
                                 flush=True,
                             )
 
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error: {e}")
+                print(f"[{time.strftime('%H:%M:%S')}] Error: {e}")
                 time.sleep(0.1)
 
         self.shutdown()

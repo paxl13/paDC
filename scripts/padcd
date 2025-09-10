@@ -112,6 +112,8 @@ restart_daemon() {
     echo -e "${GREEN}Restarting PADC daemon...${NC}"
     stop_daemon
     sleep 1
+    sudo /root/rOllama.sh
+    sleep 1
     start_daemon
 }
 
