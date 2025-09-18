@@ -108,11 +108,11 @@ class PaDCDaemon:
         """Update status file for tmux status bar"""
         try:
             if self.is_processing:
-                status = "processing"
+                status = "#[bg=yellow]process#[default]"
             elif self.state == State.RECORDING:
-                status = "recording"
+                status = "#[bg=red] record#[default]"
             else:
-                status = ""
+                status = "standby"
             STATUS_FILE.write_text(status)
         except Exception:
             pass  # Silently fail if can't write status file
