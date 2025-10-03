@@ -111,9 +111,14 @@ stop_daemon() {
 restart_daemon() {
     echo -e "${GREEN}Restarting PADC daemon...${NC}"
     stop_daemon
-    sleep 1
-    sudo /root/rOllama.sh
-    sleep 1
+    echo "Sleeping 3s"
+    sleep 3
+    sudo systemctl stop ollama.service
+    sudo rmmod nvidia_uvm
+    sudo modprobe nvidia_uvm
+    sudo systemctl start ollama.service
+    echo "Sleeping 3s"
+    sleep 3
     start_daemon
 }
 
