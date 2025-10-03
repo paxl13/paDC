@@ -59,19 +59,10 @@ class FasterWhisperGPUAdapter(STTAdapter):
                 except Exception as e2:
                     print(f"Failed with float16 on GPU: {e2}")
         
-        # Fallback to CPU
-        print("CUDA not available or failed, using CPU")
-        try:
-            self.model = WhisperModel(
-                self.model_size,
-                device="cpu",
-                compute_type="int8"
-            )
-            self.device = "cpu"
-            self.compute_type = "int8"
-            print(f"Using CPU for Faster Whisper: {self.model_size}")
-        except Exception as cpu_error:
-            print(f"Failed to initialize Faster Whisper model: {cpu_error}")
+        # No fallback - exit on failure
+        print("CUDA not available or failed")
+        raise ValueError()
+        sys.exit(1)
 
     def transcribe(self, audio_path: Path, language: Optional[str] = None) -> str:
         if not self.model:
@@ -91,36 +82,8 @@ class FasterWhisperGPUAdapter(STTAdapter):
             transcription = " ".join([segment.text.strip() for segment in segments])
             return transcription.strip()
         except Exception as e:
-            # If GPU fails during transcription, try to reinitialize with CPU
-            if self.device == "cuda":
-                print(f"GPU transcription failed: {e}")
-                print("Attempting CPU fallback...")
-                from faster_whisper import WhisperModel
-                try:
-                    self.model = WhisperModel(
-                        self.model_size,
-                        device="cpu",
-                        compute_type="int8"
-                    )
-                    self.device = "cpu"
-                    self.compute_type = "int8"
-                    
-                    segments, _ = self.model.transcribe(
-                        str(audio_path),
-                        language=language,
-                        beam_size=5,
-                        vad_filter=True,
-                        vad_parameters=dict(
-                            min_silence_duration_ms=500
-                        )
-                    )
-                    
-                    transcription = " ".join([segment.text.strip() for segment in segments])
-                    return transcription.strip()
-                except Exception as cpu_error:
-                    raise RuntimeError(f"Both GPU and CPU transcription failed: {cpu_error}")
-            else:
-                raise
+            print(f"GPU transcription failed: {e}")
+            sys.exit(1)
 
     def is_available(self) -> bool:
         return self.model is not None

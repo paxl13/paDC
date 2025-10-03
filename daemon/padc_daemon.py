@@ -100,9 +100,10 @@ class PaDCDaemon:
             )
         except Exception as e:
             print(
-                f"[{time.strftime('%H:%M:%S')}] Failed to load adapter: {e}, using fallback"
+                f"[{time.strftime('%H:%M:%S')}] Failed to load adapter: {e}"
             )
-            self.adapter = FasterWhisperAdapter(model_size="base")
+            STATUS_FILE.write_text("#[bg=red]ERROR#[default]")
+            sys.exit(1)
 
     def _update_status_file(self):
         """Update status file for tmux status bar"""
@@ -186,7 +187,9 @@ class PaDCDaemon:
             tmp_path.unlink()  # Clean up
 
             if text:
+                clipcontent = ""
                 if self.recording_mode != RecordingMode.PASTE:
+                    clipcontent = pyperclip.paste()
                     pyperclip.copy(text)
 
                 total_time = time.time() - self.processing_start_time
@@ -194,9 +197,11 @@ class PaDCDaemon:
                 # Handle paste/insert modes
                 if self.recording_mode == RecordingMode.PASTE:
                     self._paste_with_xdotool(text)
+                    pyperclip.copy(clipcontent)
                     print(f"... transcribed ({total_time:.2f}s)\n ✓ Typed: {text}", flush=True)
                 elif self.recording_mode == RecordingMode.INSERT:
                     self._insert_with_xdotool(text)
+                    pyperclip.copy(clipcontent)
                     print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
                 elif self.recording_mode == RecordingMode.INSERT_ENTER:
                     self._insert_enter_with_xdotool(text)
