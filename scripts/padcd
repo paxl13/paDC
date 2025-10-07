@@ -113,10 +113,6 @@ restart_daemon() {
     stop_daemon
     echo "Sleeping 3s"
     sleep 3
-    sudo systemctl stop ollama.service
-    sudo rmmod nvidia_uvm
-    sudo modprobe nvidia_uvm
-    sudo systemctl start ollama.service
     echo "Sleeping 3s"
     sleep 3
     start_daemon
