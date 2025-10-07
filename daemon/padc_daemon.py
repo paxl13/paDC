@@ -37,6 +37,7 @@ class RecordingMode(Enum):
     PASTE = "paste"  # Will type text with xdotool
     INSERT = "insert"  # Will paste with Shift+Insert
     INSERT_ENTER = "insert_enter"  # Will paste with Shift+Insert, then press Enter
+    INSERT_CONTINUE = "insert_continue"  # Will paste with Shift+Insert, then auto-restart recording
 
 
 class PaDCDaemon:
@@ -206,6 +207,10 @@ class PaDCDaemon:
                 elif self.recording_mode == RecordingMode.INSERT_ENTER:
                     self._insert_enter_with_xdotool(text)
                     print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted+Enter: {text}", flush=True)
+                elif self.recording_mode == RecordingMode.INSERT_CONTINUE:
+                    self._insert_with_xdotool(text)
+                    pyperclip.copy(clipcontent)
+                    print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
                 else:
                     print(f"... transcribed ({total_time:.2f}s):\n ✓ Copied{text}", flush=True)
             else:
@@ -214,10 +219,18 @@ class PaDCDaemon:
         except Exception as e:
             print(f"... transcription error: {e}", flush=True)
         finally:
+            # Check if we should auto-restart before resetting mode
+            should_auto_restart = self.recording_mode == RecordingMode.INSERT_CONTINUE
+
             self.audio_buffer = None
             self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
             self.is_processing = False
             self._update_status_file()
+
+            # Auto-restart recording if in continuous mode
+            if should_auto_restart:
+                self.recording_mode = RecordingMode.INSERT_CONTINUE
+                self.start_recording()
 
     def _paste_with_xdotool(self, text):
         """Type text using xdotool"""
@@ -276,6 +289,11 @@ class PaDCDaemon:
         self.recording_mode = RecordingMode.INSERT_ENTER
         return self.toggle()
 
+    def toggle_insert_continue(self):
+        """Toggle recording with insert-continue mode"""
+        self.recording_mode = RecordingMode.INSERT_CONTINUE
+        return self.toggle()
+
     def status(self):
         """Get daemon status"""
         adapter_name = self.adapter.__class__.__name__ if self.adapter else "None"
@@ -313,6 +331,8 @@ class PaDCDaemon:
             return self.toggle_insert()
         elif cmd == "toggle-insert-enter":
             return self.toggle_insert_enter()
+        elif cmd == "toggle-insert-continue":
+            return self.toggle_insert_continue()
         elif cmd == "start":
             return self.start_recording()
         elif cmd == "stop":

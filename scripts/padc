@@ -21,7 +21,7 @@ fi
 
 # Send command to FIFO
 case "${1:-toggle}" in
-    start|stop|cancel|toggle|toggle-paste|toggle-insert|toggle-insert-enter)
+    start|stop|cancel|insert|toggle|toggle-paste|toggle-insert|toggle-insert-enter|toggle-insert-continue)
         echo "$1" > "$FIFO"
         ;;
     help|--help|-h)
@@ -34,7 +34,9 @@ case "${1:-toggle}" in
         echo "  toggle-paste     Toggle recording and type text with xdotool"
         echo "  toggle-insert    Toggle recording and paste with Shift+Insert"
         echo "  toggle-insert-enter  Toggle recording, paste with Shift+Insert, then Enter"
+        echo "  toggle-insert-continue  Toggle recording, paste, then auto-restart for continuous dictation"
         echo "  start            Start recording"
+        echo "  insert        Start recording"
         echo "  stop             Stop recording"
         echo "  cancel           Cancel current recording without transcribing"
         echo ""
