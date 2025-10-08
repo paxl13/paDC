@@ -209,6 +209,7 @@ class GPUWhisperModel:
                 audio_buffer,
                 language='en',  # Auto-detect
                 beam_size=5,
+                condition_on_previous_text=True,
                 vad_filter=True,
                 vad_parameters=dict(
                     min_silence_duration_ms=500
@@ -234,7 +235,6 @@ class PaDCDaemon:
         self.running = True
         self.recording_mode = RecordingMode.NORMAL
         self.is_processing = False
-        self.timeout_timer = None
 
         # Initialize status file
         self._update_status_file()
@@ -285,26 +285,12 @@ class PaDCDaemon:
 
         return processed
 
-    def _auto_stop_recording(self):
-        """Auto-stop recording after timeout"""
-        if self.state == State.RECORDING:
-            print(f"\n[{time.strftime('%H:%M:%S')}] Auto-stopping (2min timeout)... ", end="", flush=True)
-            self.stop_recording()
-
     def start_recording(self):
         """Start recording audio"""
         if self.state == State.RECORDING:
             return "already_recording"
 
         self.state = State.RECORDING
-
-        # Start 2-minute timeout timer
-        if self.timeout_timer:
-            self.timeout_timer.cancel()
-        self.timeout_timer = threading.Timer(120.0, self._auto_stop_recording)
-        self.timeout_timer.daemon = True
-        self.timeout_timer.start()
-
         self._update_status_file()
         self.recorder.start(play_chime=True)
         print(f"[{time.strftime('%H:%M:%S')}] Recording started... ", end="", flush=True)
@@ -314,11 +300,6 @@ class PaDCDaemon:
         """Stop recording and transcribe"""
         if self.state != State.RECORDING:
             return "not_recording"
-
-        # Cancel timeout timer
-        if self.timeout_timer:
-            self.timeout_timer.cancel()
-            self.timeout_timer = None
 
         # Change state immediately to prevent re-entry
         self.state = State.IDLE
@@ -362,11 +343,6 @@ class PaDCDaemon:
         if self.state != State.RECORDING:
             return "not_recording"
 
-        # Cancel timeout timer
-        if self.timeout_timer:
-            self.timeout_timer.cancel()
-            self.timeout_timer = None
-
         # Stop recording but don't save the audio
         self.recorder.stop()
         self.state = State.IDLE
@@ -393,19 +369,22 @@ class PaDCDaemon:
             # Process text to fix common Whisper mistakes
             text = self.process_text(text)
 
+            total_time = time.time() - processing_start_time
+
             if text:
                 clipcontent = pyperclip.paste()
                 pyperclip.copy(text)
 
-                total_time = time.time() - processing_start_time
 
                 # Handle insert modes
                 if recording_mode == RecordingMode.INSERT:
                     self._insert_with_xdotool(text)
+                    time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
                     pyperclip.copy(clipcontent)
                     print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
                 elif recording_mode == RecordingMode.INSERT_CONTINUE:
                     self._insert_with_xdotool(text)
+                    time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
                     pyperclip.copy(clipcontent)
                     print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
                 else:
