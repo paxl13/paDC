@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from enum import Enum
 from collections import deque
+from datetime import datetime
 import numpy as np
 import pyperclip
 from dotenv import load_dotenv
@@ -23,6 +24,10 @@ FIFO_PATH = Path("/tmp/padc.fifo")
 PID_FILE = Path("/tmp/padc_daemon.pid")
 LOG_FILE = Path("/tmp/padc_daemon.log")
 STATUS_FILE = Path.home() / ".padc_status"
+
+# Get project root (where the daemon script is located)
+PROJECT_ROOT = Path(__file__).parent.parent
+TRANSCRIPTION_LOG = PROJECT_ROOT / "transcriptions.log"
 
 
 class State(Enum):
@@ -343,6 +348,16 @@ class PaDCDaemon:
 
         return processed
 
+    def _log_transcription(self, text: str):
+        """Log transcription to file with date and time"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(TRANSCRIPTION_LOG, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} {text}\n")
+        except Exception as e:
+            # Silently fail if can't write to log
+            pass
+
     def start_recording(self):
         """Start recording audio"""
         if self.state == State.RECORDING:
@@ -438,6 +453,9 @@ class PaDCDaemon:
             total_time = time.time() - processing_start_time
 
             if text:
+                # Log transcription to file
+                self._log_transcription(text)
+
                 clipcontent = pyperclip.paste()
                 pyperclip.copy(text)
 
