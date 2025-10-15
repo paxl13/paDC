@@ -10,6 +10,7 @@ import queue
 import subprocess
 from pathlib import Path
 from enum import Enum
+from collections import deque
 import numpy as np
 import pyperclip
 from dotenv import load_dotenv
@@ -42,12 +43,17 @@ class RecordingMode(Enum):
 class AudioRecorder:
     """Inline audio recorder - records audio to numpy buffer"""
 
-    def __init__(self, sample_rate: int = 16000, channels: int = 1):
+    def __init__(self, sample_rate: int = 16000, channels: int = 1, buffer_seconds: float = 60.0):
         self.sample_rate = sample_rate
         self.channels = channels
+        self.buffer_seconds = buffer_seconds
         self.recording = False
         self.audio_queue = queue.Queue()
-        self.audio_data = []
+
+        # We'll calculate maxlen dynamically after seeing first chunk
+        # Start with a large estimate, will be adjusted on first append
+        self.audio_data = deque()
+        self.chunks_per_second = None
         self.thread = None
 
     def _audio_callback(self, indata, frames, time_info, status):
@@ -90,7 +96,7 @@ class AudioRecorder:
 
     def start(self, play_chime=True):
         self.recording = True
-        self.audio_data = []
+        self.audio_data.clear()
         self.thread = threading.Thread(target=self._record_thread)
         self.thread.start()
         if play_chime:
@@ -107,6 +113,15 @@ class AudioRecorder:
             while self.recording:
                 try:
                     data = self.audio_queue.get(timeout=0.1)
+
+                    # On first chunk, calculate proper maxlen based on actual chunk size
+                    if self.chunks_per_second is None:
+                        frames_per_chunk = len(data)
+                        self.chunks_per_second = self.sample_rate / frames_per_chunk
+                        max_chunks = int(self.chunks_per_second * self.buffer_seconds)
+                        # Recreate deque with proper maxlen
+                        self.audio_data = deque(self.audio_data, maxlen=max_chunks)
+
                     self.audio_data.append(data)
                 except queue.Empty:
                     continue
@@ -215,8 +230,8 @@ class GPUWhisperModel:
             # Transcribe directly from buffer with context
             segments, _ = self.model.transcribe(
                 audio_buffer,
-                language='en',
                 beam_size=5,
+                language='en',
                 condition_on_previous_text=True,
                 initial_prompt=context_text,
                 vad_filter=True,
