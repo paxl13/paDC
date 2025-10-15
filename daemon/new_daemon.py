@@ -127,13 +127,15 @@ class AudioRecorder:
 # ============================================================================
 
 class GPUWhisperModel:
-    """Inline GPU-only Whisper model wrapper"""
+    """Inline GPU-only Whisper model wrapper with contextual transcription"""
 
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: str = "base", max_context_words: int = 200):
         self.model_size = model_size
         self.model = None
         self.device = "cuda"
         self.compute_type = "int8"
+        self.context = []
+        self.max_context_words = max_context_words
         self._initialize_model()
 
     def _check_cuda_available(self) -> bool:
@@ -192,7 +194,7 @@ class GPUWhisperModel:
         sys.exit(1)
 
     def transcribe_buffer(self, audio_buffer: np.ndarray) -> str:
-        """Transcribe audio buffer directly (no file I/O)"""
+        """Transcribe audio buffer directly with contextual awareness"""
         if not self.model:
             raise RuntimeError("GPU Whisper model not initialized")
 
@@ -204,23 +206,43 @@ class GPUWhisperModel:
             if audio_buffer.ndim > 1:
                 audio_buffer = audio_buffer.flatten()
 
-            # Transcribe directly from buffer
+            # Prepare context from previous transcriptions
+            context_text = " ".join(self.context[-self.max_context_words:]) if self.context else None
+
+            if context_text:
+                print(f"[Context: ...{context_text[-100:]}]")  # Show last 100 chars of context
+
+            # Transcribe directly from buffer with context
             segments, _ = self.model.transcribe(
                 audio_buffer,
-                language='en',  # Auto-detect
+                language='en',
                 beam_size=5,
                 condition_on_previous_text=True,
+                initial_prompt=context_text,
                 vad_filter=True,
                 vad_parameters=dict(
                     min_silence_duration_ms=500
                 )
             )
 
-            transcription = " ".join([segment.text.strip() for segment in segments])
+            # Collect transcription and update context
+            new_text_words = []
+            for segment in segments:
+                words = segment.text.strip().split()
+                new_text_words.extend(words)
+
+            # Update context with new words
+            self.context.extend(new_text_words)
+
+            transcription = " ".join(new_text_words)
             return transcription.strip()
         except Exception as e:
             print(f"GPU transcription failed: {e}")
             return ""
+
+    def reset_context(self):
+        """Clear context without restarting model"""
+        self.context = []
 
 
 # ============================================================================
@@ -235,6 +257,7 @@ class PaDCDaemon:
         self.running = True
         self.recording_mode = RecordingMode.NORMAL
         self.is_processing = False
+        self.context_reset_timer = None
 
         # Initialize status file
         self._update_status_file()
@@ -253,6 +276,26 @@ class PaDCDaemon:
 
         self.whisper = GPUWhisperModel(model_size=model_size)
         print(f"[{time.strftime('%H:%M:%S')}] GPU Whisper model loaded successfully")
+
+    def _auto_reset_context(self):
+        """Auto-reset context after inactivity"""
+        if self.whisper:
+            self.whisper.reset_context()
+            print(f"[{time.strftime('%H:%M:%S')}] Context auto-reset (1min inactivity)", flush=True)
+
+    def _start_context_reset_timer(self):
+        """Start timer to auto-reset context after 1 minute of inactivity"""
+        if self.context_reset_timer:
+            self.context_reset_timer.cancel()
+        self.context_reset_timer = threading.Timer(60.0, self._auto_reset_context)
+        self.context_reset_timer.daemon = True
+        self.context_reset_timer.start()
+
+    def _cancel_context_reset_timer(self):
+        """Cancel context reset timer"""
+        if self.context_reset_timer:
+            self.context_reset_timer.cancel()
+            self.context_reset_timer = None
 
     def _update_status_file(self):
         """Update status file for tmux status bar"""
@@ -290,6 +333,9 @@ class PaDCDaemon:
         if self.state == State.RECORDING:
             return "already_recording"
 
+        # Cancel context reset timer when starting to record
+        self._cancel_context_reset_timer()
+
         self.state = State.RECORDING
         self._update_status_file()
         self.recorder.start(play_chime=True)
@@ -317,6 +363,8 @@ class PaDCDaemon:
             self.recording_mode = RecordingMode.INSERT_CONTINUE
         else:
             self._update_status_file()
+            # Start context reset timer when entering idle state
+            self._start_context_reset_timer()
 
         self.is_processing = True
         self._update_status_file()
@@ -348,6 +396,9 @@ class PaDCDaemon:
         self.state = State.IDLE
         self._update_status_file()
         self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
+
+        # Start context reset timer when entering idle state
+        self._start_context_reset_timer()
 
         # Play cancel sound in a separate thread to not block
         threading.Thread(target=self.recorder.play_cancel_sound).start()
@@ -440,6 +491,9 @@ class PaDCDaemon:
         if self.state == State.RECORDING:
             self.recorder.stop()
 
+        # Cancel context reset timer
+        self._cancel_context_reset_timer()
+
         # Cleanup
         if FIFO_PATH.exists():
             os.unlink(FIFO_PATH)
@@ -453,8 +507,15 @@ class PaDCDaemon:
 
         sys.exit(0)
 
+    def reset_context(self):
+        """Reset transcription context"""
+        if self.whisper:
+            self.whisper.reset_context()
+            return "context_reset"
+        return "whisper_not_initialized"
+
     def process_command(self, cmd):
-        """Process a single command - cancel, insert, toggle-insert, toggle-insert-continue"""
+        """Process a single command - cancel, insert, toggle-insert, toggle-insert-continue, reset-context"""
         cmd = cmd.strip().lower()
 
         if cmd == "insert":
@@ -465,6 +526,8 @@ class PaDCDaemon:
             return self.toggle_insert_continue()
         elif cmd == "cancel":
             return self.cancel_recording()
+        elif cmd == "reset-context":
+            return self.reset_context()
         elif cmd == "shutdown":
             self.shutdown()
         else:
