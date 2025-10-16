@@ -203,7 +203,7 @@ class GPUWhisperModel:
             )
             self.compute_type = "int8"
             self.tokenizer = self.model.hf_tokenizer
-            print(f"Initialized GPU Whisper model: {self.model_size} (int8)")
+            print(f"[{time.strftime('%H:%M:%S')}] Initialized GPU Whisper model: {self.model_size} (int8)")
             return
         except Exception as e:
             print(f"Failed with int8 on GPU: {e}")
@@ -217,7 +217,7 @@ class GPUWhisperModel:
                 )
                 self.compute_type = "float16"
                 self.tokenizer = self.model.hf_tokenizer
-                print(f"Initialized GPU Whisper model: {self.model_size} (float16)")
+                print(f"[{time.strftime('%H:%M:%S')}] Initialized GPU Whisper model: {self.model_size} (float16)")
                 return
             except Exception as e2:
                 print(f"Failed with float16 on GPU: {e2}")
@@ -364,7 +364,7 @@ class PaDCDaemon:
         """Auto-reset context after inactivity"""
         if self.whisper:
             self.whisper.reset_context()
-            print(f"[{time.strftime('%H:%M:%S')}] Context auto-reset (1min inactivity)", flush=True)
+            print(f"\n[{time.strftime('%H:%M:%S')}]\n┌─ Context Reset\n│ Reason: 1 minute inactivity\n└─ Context cleared", flush=True)
 
     def _start_context_reset_timer(self):
         """Start timer to auto-reset context after 1 minute of inactivity"""
@@ -498,8 +498,10 @@ class PaDCDaemon:
                 self._log_transcription(text)
 
                 # Display consolidated transcription info
+                timestamp = time.strftime('%H:%M:%S')
                 log_lines = []
-                log_lines.append(f"\n┌─ Transcription ({total_time:.2f}s)")
+                log_lines.append(f"\n[{timestamp}]")
+                log_lines.append(f"┌─ Transcription ({total_time:.2f}s)")
                 log_lines.append(f"│ Buffer: {info.get('buffer_duration', 0):.2f}s")
 
                 if info.get('has_speech'):
@@ -531,10 +533,11 @@ class PaDCDaemon:
 
                 print("\n".join(log_lines), flush=True)
             else:
+                timestamp = time.strftime('%H:%M:%S')
                 if info.get('has_speech') is False:
-                    print(f"\n┌─ Transcription ({total_time:.2f}s)\n│ Buffer: {info.get('buffer_duration', 0):.2f}s\n└─ No speech detected", flush=True)
+                    print(f"\n[{timestamp}]\n┌─ Transcription ({total_time:.2f}s)\n│ Buffer: {info.get('buffer_duration', 0):.2f}s\n└─ No speech detected", flush=True)
                 else:
-                    print(f"\n... no speech detected ({total_time:.2f}s)", flush=True)
+                    print(f"\n[{timestamp}]\n... no speech detected ({total_time:.2f}s)", flush=True)
 
         except Exception as e:
             print(f"\n... transcription error: {e}", flush=True)
