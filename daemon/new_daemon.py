@@ -417,25 +417,22 @@ class PaDCDaemon:
         return "processing"
 
     def cancel_recording(self):
-        """Cancel recording without transcribing"""
+        """Drop audio buffer and reset context while continuing to record"""
         if self.state != State.RECORDING:
             return "not_recording"
 
-        # Stop recording but don't save the audio
-        self.recorder.stop()
-        self.state = State.IDLE
-        self._update_status_file()
-        self.recording_mode = RecordingMode.NORMAL  # Reset to normal mode
+        # Clear the audio buffer without stopping recording
+        self.recorder.audio_data.clear()
 
-        # Start context reset timer when entering idle state
-        self._start_context_reset_timer()
+        # Reset context immediately
+        if self.whisper:
+            self.whisper.reset_context()
 
-        # Play cancel sound in a separate thread to not block
-        threading.Thread(target=self.recorder.play_cancel_sound).start()
+        # Reset mode to normal
+        self.recording_mode = RecordingMode.NORMAL
 
-        # Complete the same line that started with "Recording started..."
-        print("cancelled", flush=True)
-        return "recording_cancelled"
+        print(f"[{time.strftime('%H:%M:%S')}] Buffer cleared, context reset (still recording)", flush=True)
+        return "buffer_cleared"
 
     def _transcribe(self, audio_buffer, processing_start_time, recording_mode):
         """Transcribe audio in background thread - direct buffer transcription"""
