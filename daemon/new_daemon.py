@@ -131,7 +131,19 @@ class AudioRecorder:
                 except queue.Empty:
                     continue
 
+    def get_buffer_snapshot(self) -> np.ndarray:
+        """Get a copy of the current buffer without stopping recording"""
+        if not self.audio_data:
+            return np.array([])
+
+        # Create a copy of current buffer and clear for next recording
+        buffer_copy = list(self.audio_data)
+        self.audio_data.clear()
+
+        return np.concatenate(buffer_copy, axis=0)
+
     def stop(self) -> np.ndarray:
+        """Stop recording completely (only used on shutdown)"""
         self.recording = False
         if self.thread:
             self.thread.join()
@@ -173,7 +185,12 @@ class GPUWhisperModel:
 
     def _initialize_model(self):
         """Initialize GPU Whisper model - exits on failure"""
+        import logging
         from faster_whisper import WhisperModel
+
+        # Enable debug logging for faster-whisper
+        logging.basicConfig()
+        logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 
         # Check if CUDA is actually available and working
         if not self._check_cuda_available():
@@ -226,6 +243,10 @@ class GPUWhisperModel:
             if audio_buffer.ndim > 1:
                 audio_buffer = audio_buffer.flatten()
 
+            # Calculate audio duration
+            audio_duration = len(audio_buffer) / 16000  # 16kHz sample rate
+            print(f"[Audio buffer: {audio_duration:.2f}s]", flush=True)
+
             # Prepare context from previous transcriptions
             context_text = " ".join(self.context[-self.max_context_words:]) if self.context else None
 
@@ -245,11 +266,23 @@ class GPUWhisperModel:
                 )
             )
 
-            # Collect transcription and update context
+            # Collect transcription and update context with VAD timing info
             new_text_words = []
-            for segment in segments:
-                words = segment.text.strip().split()
-                new_text_words.extend(words)
+            segments_list = list(segments)  # Force evaluation of generator
+
+            if segments_list:
+                first_segment = segments_list[0]
+                last_segment = segments_list[-1]
+
+                print(f"[VAD: Speech detected from {first_segment.start:.2f}s to {last_segment.end:.2f}s]", flush=True)
+                print(f"[VAD: Trimmed {first_segment.start:.2f}s from start, {audio_duration - last_segment.end:.2f}s from end]", flush=True)
+
+                for i, segment in enumerate(segments_list):
+                    print(f"[Segment {i+1}: {segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}", flush=True)
+                    words = segment.text.strip().split()
+                    new_text_words.extend(words)
+            else:
+                print(f"[VAD: No speech detected in {audio_duration:.2f}s buffer]", flush=True)
 
             # Update context with new words
             self.context.extend(new_text_words)
@@ -375,33 +408,16 @@ class PaDCDaemon:
         return "recording_started"
 
     def stop_recording(self):
-        """Stop recording and transcribe"""
+        """Snapshot buffer and transcribe (recording continues)"""
         if self.state != State.RECORDING:
             return "not_recording"
 
-        # Change state immediately to prevent re-entry
-        self.state = State.IDLE
-
-        # Get audio from memory
-        audio_buffer = self.recorder.stop()
-
-        # Check if we should auto-restart
-        should_auto_restart = self.recording_mode == RecordingMode.INSERT_CONTINUE
-
-        # If auto-restart, start recording immediately (no gap)
-        if should_auto_restart:
-            self.start_recording()  # Start new recording
-            # Keep the mode as INSERT_CONTINUE for next iteration
-            self.recording_mode = RecordingMode.INSERT_CONTINUE
-        else:
-            self._update_status_file()
+        # Get snapshot of current buffer (clears buffer, keeps recording)
+        audio_buffer = self.recorder.get_buffer_snapshot()
 
         self.is_processing = True
         self._update_status_file()
         processing_start_time = time.time()
-
-        # Update the same line with processing message
-        print("processing", end="", flush=True)
 
         # Process in background with a copy of the buffer
         threading.Thread(
@@ -410,9 +426,8 @@ class PaDCDaemon:
             daemon=True
         ).start()
 
-        # Reset mode to normal if not auto-restarting
-        if not should_auto_restart:
-            self.recording_mode = RecordingMode.NORMAL
+        # Reset mode to normal after triggering transcription
+        self.recording_mode = RecordingMode.NORMAL
 
         return "processing"
 
