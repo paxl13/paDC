@@ -289,6 +289,8 @@ class PaDCDaemon:
         signal.signal(signal.SIGTERM, lambda s, f: self.shutdown())
         signal.signal(signal.SIGINT, lambda s, f: self.shutdown())
 
+        self.start_recording()
+
     def _init_whisper(self):
         """Initialize GPU Whisper model - runs once at startup"""
         model_size = os.environ.get("PADC_MODEL", os.environ.get("WHISPER_MODEL", "base"))
@@ -323,7 +325,7 @@ class PaDCDaemon:
             if self.is_processing:
                 status = "#[bg=yellow]process#[default]"
             elif self.state == State.RECORDING:
-                status = "#[bg=red] record#[default]"
+                status = "online"
             else:
                 status = "standby"
             STATUS_FILE.write_text(status)
@@ -368,7 +370,7 @@ class PaDCDaemon:
 
         self.state = State.RECORDING
         self._update_status_file()
-        self.recorder.start(play_chime=True)
+        self.recorder.start(play_chime=False)
         print(f"[{time.strftime('%H:%M:%S')}] Recording started... ", end="", flush=True)
         return "recording_started"
 
@@ -393,8 +395,6 @@ class PaDCDaemon:
             self.recording_mode = RecordingMode.INSERT_CONTINUE
         else:
             self._update_status_file()
-            # Start context reset timer when entering idle state
-            self._start_context_reset_timer()
 
         self.is_processing = True
         self._update_status_file()
@@ -481,6 +481,9 @@ class PaDCDaemon:
         finally:
             self.is_processing = False
             self._update_status_file()
+            # Start context reset timer after every transcription
+            # Will be cancelled if user starts recording again within 1 minute
+            self._start_context_reset_timer()
 
     def _insert_with_xdotool(self, text):
         """Paste using Shift+Insert"""
