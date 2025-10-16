@@ -161,13 +161,14 @@ class AudioRecorder:
 class GPUWhisperModel:
     """Inline GPU-only Whisper model wrapper with contextual transcription"""
 
-    def __init__(self, model_size: str = "base", max_context_words: int = 200):
+    def __init__(self, model_size: str = "base", max_context_tokens: int = 200):
         self.model_size = model_size
         self.model = None
         self.device = "cuda"
         self.compute_type = "int8"
-        self.context = []
-        self.max_context_words = max_context_words
+        self.context_tokens = []  # Store token IDs directly for efficiency
+        self.max_context_tokens = max_context_tokens
+        self.tokenizer = None
         self._initialize_model()
 
     def _check_cuda_available(self) -> bool:
@@ -184,13 +185,8 @@ class GPUWhisperModel:
         return False
 
     def _initialize_model(self):
-        """Initialize GPU Whisper model - exits on failure"""
-        import logging
+        """Initialize GPU Whisper model and tokenizer - exits on failure"""
         from faster_whisper import WhisperModel
-
-        # Enable debug logging for faster-whisper
-        logging.basicConfig()
-        logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 
         # Check if CUDA is actually available and working
         if not self._check_cuda_available():
@@ -206,6 +202,7 @@ class GPUWhisperModel:
                 compute_type="int8"
             )
             self.compute_type = "int8"
+            self.tokenizer = self.model.hf_tokenizer
             print(f"Initialized GPU Whisper model: {self.model_size} (int8)")
             return
         except Exception as e:
@@ -217,9 +214,9 @@ class GPUWhisperModel:
                     self.model_size,
                     device="cuda",
                     compute_type="float16"
-
                 )
                 self.compute_type = "float16"
+                self.tokenizer = self.model.hf_tokenizer
                 print(f"Initialized GPU Whisper model: {self.model_size} (float16)")
                 return
             except Exception as e2:
@@ -230,13 +227,17 @@ class GPUWhisperModel:
         STATUS_FILE.write_text("#[bg=red]ERROR#[default]")
         sys.exit(1)
 
-    def transcribe_buffer(self, audio_buffer: np.ndarray) -> str:
-        """Transcribe audio buffer directly with contextual awareness"""
+    def transcribe_buffer(self, audio_buffer: np.ndarray) -> tuple[str, dict]:
+        """Transcribe audio buffer directly with contextual awareness
+
+        Returns:
+            tuple: (transcription_text, info_dict) where info_dict contains timing and VAD info
+        """
         if not self.model:
             raise RuntimeError("GPU Whisper model not initialized")
 
         if audio_buffer.size == 0:
-            return ""
+            return "", {}
 
         try:
             # Flatten to 1D if needed (faster-whisper expects 1D float32 array at 16kHz)
@@ -245,13 +246,15 @@ class GPUWhisperModel:
 
             # Calculate audio duration
             audio_duration = len(audio_buffer) / 16000  # 16kHz sample rate
-            print(f"[Audio buffer: {audio_duration:.2f}s]", flush=True)
 
-            # Prepare context from previous transcriptions
-            context_text = " ".join(self.context[-self.max_context_words:]) if self.context else None
+            # Prepare context from previous transcriptions (token-limited)
+            context_text = None
+            context_tokens_count = len(self.context_tokens)
 
-            if context_text:
-                print(f"[Context: ...{context_text[-100:]}]")  # Show last 100 chars of context
+            if self.context_tokens:
+                # Decode tokens directly (no re-encoding needed!)
+                # context_tokens is a list of token IDs (integers)
+                context_text = self.tokenizer.decode(self.context_tokens, skip_special_tokens=True)
 
             # Transcribe directly from buffer with context
             segments, _ = self.model.transcribe(
@@ -270,32 +273,57 @@ class GPUWhisperModel:
             new_text_words = []
             segments_list = list(segments)  # Force evaluation of generator
 
+            # Build info dict for logging
+            info = {
+                'buffer_duration': audio_duration,
+                'context_tokens_before': context_tokens_count,
+                'has_speech': len(segments_list) > 0,
+            }
+
             if segments_list:
                 first_segment = segments_list[0]
                 last_segment = segments_list[-1]
 
-                print(f"[VAD: Speech detected from {first_segment.start:.2f}s to {last_segment.end:.2f}s]", flush=True)
-                print(f"[VAD: Trimmed {first_segment.start:.2f}s from start, {audio_duration - last_segment.end:.2f}s from end]", flush=True)
+                info.update({
+                    'speech_start': first_segment.start,
+                    'speech_end': last_segment.end,
+                    'trimmed_start': first_segment.start,
+                    'trimmed_end': audio_duration - last_segment.end,
+                    'segments': []
+                })
 
-                for i, segment in enumerate(segments_list):
-                    print(f"[Segment {i+1}: {segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}", flush=True)
+                for segment in segments_list:
+                    info['segments'].append({
+                        'start': segment.start,
+                        'end': segment.end,
+                        'text': segment.text
+                    })
                     words = segment.text.strip().split()
                     new_text_words.extend(words)
-            else:
-                print(f"[VAD: No speech detected in {audio_duration:.2f}s buffer]", flush=True)
 
-            # Update context with new words
-            self.context.extend(new_text_words)
-
+            # Update context with new tokens (efficient: only tokenize new text once!)
             transcription = " ".join(new_text_words)
-            return transcription.strip()
+            if transcription:
+                # Tokenize only the new text
+                # encode() returns an Encoding object, get the token IDs with .ids
+                encoding = self.tokenizer.encode(transcription)
+                new_tokens = encoding.ids if hasattr(encoding, 'ids') else encoding
+                # Append new tokens to context
+                self.context_tokens.extend(new_tokens)
+                # Trim to max_context_tokens (keep most recent)
+                if len(self.context_tokens) > self.max_context_tokens:
+                    self.context_tokens = self.context_tokens[-self.max_context_tokens:]
+
+            info['context_tokens_after'] = len(self.context_tokens)
+
+            return transcription.strip(), info
         except Exception as e:
             print(f"GPU transcription failed: {e}")
-            return ""
+            return "", {}
 
     def reset_context(self):
         """Clear context without restarting model"""
-        self.context = []
+        self.context_tokens = []
 
 
 # ============================================================================
@@ -457,39 +485,59 @@ class PaDCDaemon:
                 return
 
             # Transcribe directly from buffer (no temp file!)
-            text = self.whisper.transcribe_buffer(audio_buffer)
+            text, info = self.whisper.transcribe_buffer(audio_buffer)
 
             # Process text to fix common Whisper mistakes
             text = self.process_text(text)
 
             total_time = time.time() - processing_start_time
 
+            # Build comprehensive log output
             if text:
                 # Log transcription to file
                 self._log_transcription(text)
 
+                # Display consolidated transcription info
+                log_lines = []
+                log_lines.append(f"\n┌─ Transcription ({total_time:.2f}s)")
+                log_lines.append(f"│ Buffer: {info.get('buffer_duration', 0):.2f}s")
+
+                if info.get('has_speech'):
+                    log_lines.append(f"│ Speech: {info.get('speech_start', 0):.2f}s → {info.get('speech_end', 0):.2f}s")
+                    log_lines.append(f"│ VAD trimmed: {info.get('trimmed_start', 0):.2f}s (start), {info.get('trimmed_end', 0):.2f}s (end)")
+
+                log_lines.append(f"│ Context: {info.get('context_tokens_before', 0)} → {info.get('context_tokens_after', 0)} tokens")
+                log_lines.append(f"│")
+
+                # Show segments if available
+                if info.get('segments'):
+                    for i, seg in enumerate(info['segments'], 1):
+                        log_lines.append(f"│ [{seg['start']:.2f}s-{seg['end']:.2f}s]{seg['text']}")
+
+                log_lines.append(f"│")
+                log_lines.append(f"│ Result: {text}")
+
+                # Handle clipboard and insert modes
                 clipcontent = pyperclip.paste()
                 pyperclip.copy(text)
 
-
-                # Handle insert modes
-                if recording_mode == RecordingMode.INSERT:
+                if recording_mode == RecordingMode.INSERT or recording_mode == RecordingMode.INSERT_CONTINUE:
                     self._insert_with_xdotool(text)
                     time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
                     pyperclip.copy(clipcontent)
-                    print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
-                elif recording_mode == RecordingMode.INSERT_CONTINUE:
-                    self._insert_with_xdotool(text)
-                    time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
-                    pyperclip.copy(clipcontent)
-                    print(f"... transcribed ({total_time:.2f}s)\n ✓ Pasted: {text}", flush=True)
+                    log_lines.append(f"└─ ✓ Pasted")
                 else:
-                    print(f"... transcribed ({total_time:.2f}s):\n ✓ Copied: {text}", flush=True)
+                    log_lines.append(f"└─ ✓ Copied to clipboard")
+
+                print("\n".join(log_lines), flush=True)
             else:
-                print("... no speech detected", flush=True)
+                if info.get('has_speech') is False:
+                    print(f"\n┌─ Transcription ({total_time:.2f}s)\n│ Buffer: {info.get('buffer_duration', 0):.2f}s\n└─ No speech detected", flush=True)
+                else:
+                    print(f"\n... no speech detected ({total_time:.2f}s)", flush=True)
 
         except Exception as e:
-            print(f"... transcription error: {e}", flush=True)
+            print(f"\n... transcription error: {e}", flush=True)
         finally:
             self.is_processing = False
             self._update_status_file()
