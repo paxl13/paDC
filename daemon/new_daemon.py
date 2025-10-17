@@ -526,10 +526,10 @@ class PaDCDaemon:
                 pyperclip.copy(text)
 
                 if recording_mode == RecordingMode.INSERT or recording_mode == RecordingMode.INSERT_CONTINUE:
-                    self._insert_with_xdotool(text)
+                    insert_method = self._insert_with_xdotool(text)
                     time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
                     pyperclip.copy(clipcontent)
-                    log_lines.append(f"└─ ✓ Pasted")
+                    log_lines.append(f"└─ ✓ Pasted ({insert_method})")
                 else:
                     log_lines.append(f"└─ ✓ Copied to clipboard")
 
@@ -551,11 +551,36 @@ class PaDCDaemon:
             self._start_context_reset_timer()
 
     def _insert_with_xdotool(self, text):
-        """Paste using Shift+Insert"""
+        """Paste using tmux send-keys if marked pane exists, otherwise Shift+Insert"""
         try:
-            subprocess.run(["xdotool", "key", "shift+Insert"], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass  # Error will be handled in calling function
+            # Check if there's a marked pane
+            check_result = subprocess.run(
+                ["bash", "-c", "tmux list-panes -a -F '#{pane_marked}' | grep -q 1"],
+                capture_output=True
+            )
+
+            has_marked_pane = (check_result.returncode == 0)
+
+            if has_marked_pane:
+                # Use tmux send-keys to marked pane (add trailing space)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", "{marked}", text + " "],
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
+                return "tmux"
+            else:
+                # Fallback to xdotool Shift+Insert
+                subprocess.run(["xdotool", "key", "shift+Insert"], check=True)
+                return "shift+Insert"
+
+        except subprocess.CalledProcessError as e:
+            print(f"[{time.strftime('%H:%M:%S')}] Insert error: {e}", flush=True)
+            return "error"
+        except FileNotFoundError as e:
+            print(f"[{time.strftime('%H:%M:%S')}] Command not found: {e}", flush=True)
+            return "error"
 
     def insert(self):
         """Stop recording and insert (no toggle, no auto-restart)"""
