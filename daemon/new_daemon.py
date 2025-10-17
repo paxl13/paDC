@@ -333,7 +333,9 @@ class GPUWhisperModel:
 class PaDCDaemon:
     def __init__(self):
         self.state = State.IDLE
-        self.recorder = AudioRecorder()
+        # Get buffer size from environment or default to 30 seconds
+        buffer_seconds = float(os.environ.get("PADC_BUFFER_SECONDS", "30.0"))
+        self.recorder = AudioRecorder(buffer_seconds=buffer_seconds)
         self.whisper = None
         self.running = True
         self.recording_mode = RecordingMode.NORMAL

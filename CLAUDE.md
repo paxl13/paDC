@@ -61,9 +61,17 @@ PADC_MODEL=base
 
 # Alternative variable name (both work)
 WHISPER_MODEL=base
+
+# Buffer size in seconds (rolling window of audio kept in memory)
+PADC_BUFFER_SECONDS=30.0
+# Default: 30 seconds
+# Increase for longer continuous dictation without triggering transcription
 ```
 
-**Note:** `PADC_ADAPTER` is not used in new_daemon.py (GPU-only, no adapter selection).
+**Notes:**
+- `PADC_ADAPTER` is not used in new_daemon.py (GPU-only, no adapter selection)
+- The buffer is a rolling window - when it reaches the configured size, old audio is automatically discarded
+- The buffer does NOT clear between transcriptions, ensuring no audio is lost
 
 ## Architecture: daemon/new_daemon.py
 
