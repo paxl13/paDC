@@ -16,6 +16,7 @@ import numpy as np
 import pyperclip
 from dotenv import load_dotenv
 import sounddevice as sd
+import wave
 
 load_dotenv()
 
@@ -28,6 +29,7 @@ STATUS_FILE = Path.home() / ".padc_status"
 # Get project root (where the daemon script is located)
 PROJECT_ROOT = Path(__file__).parent.parent
 TRANSCRIPTION_LOG = PROJECT_ROOT / "transcriptions.log"
+DEBUG_AUDIO_DIR = PROJECT_ROOT / "debug_audio"
 
 
 class State(Enum):
@@ -39,6 +41,45 @@ class RecordingMode(Enum):
     NORMAL = "normal"  # Only used for cancel
     INSERT = "insert"  # Paste with Shift+Insert
     INSERT_CONTINUE = "insert_continue"  # Paste with Shift+Insert, then auto-restart
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def save_audio_buffer_to_wav(audio_buffer: np.ndarray, output_path: Path, sample_rate: int = 16000):
+    """Save numpy audio buffer to WAV file in a separate thread
+
+    Args:
+        audio_buffer: numpy array of audio samples (float32, -1.0 to 1.0)
+        output_path: Path where WAV file should be saved
+        sample_rate: Sample rate of the audio (default 16000 Hz)
+    """
+    def _save():
+        try:
+            # Ensure directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Convert float32 [-1.0, 1.0] to int16 [-32768, 32767]
+            audio_int16 = (audio_buffer * 32767).astype(np.int16)
+
+            # Flatten if needed
+            if audio_int16.ndim > 1:
+                audio_int16 = audio_int16.flatten()
+
+            # Write WAV file
+            with wave.open(str(output_path), 'wb') as wav_file:
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)  # 2 bytes for int16
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(audio_int16.tobytes())
+
+            print(f"[{time.strftime('%H:%M:%S')}] Debug: Saved audio buffer to {output_path}", flush=True)
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] Warning: Failed to save debug audio: {e}", flush=True)
+
+    # Run in separate thread to avoid blocking transcription
+    threading.Thread(target=_save, daemon=True).start()
 
 
 # ============================================================================
@@ -342,6 +383,11 @@ class PaDCDaemon:
         self.is_processing = False
         self.context_reset_timer = None
 
+        # Debug audio saving configuration
+        self.debug_save_audio = os.environ.get("PADC_DEBUG_SAVE_AUDIO", "false").lower() == "true"
+        if self.debug_save_audio:
+            print(f"[{time.strftime('%H:%M:%S')}] Debug audio saving enabled -> {DEBUG_AUDIO_DIR}")
+
         # Initialize status file
         self._update_status_file()
 
@@ -485,6 +531,12 @@ class PaDCDaemon:
             if audio_buffer is None or audio_buffer.size == 0:
                 print("... no audio captured", flush=True)
                 return
+
+            # Debug: Save audio buffer to WAV file if enabled
+            if self.debug_save_audio:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                debug_wav_path = DEBUG_AUDIO_DIR / f"buffer_{timestamp}.wav"
+                save_audio_buffer_to_wav(audio_buffer, debug_wav_path, sample_rate=16000)
 
             # Transcribe directly from buffer (no temp file!)
             text, info = self.whisper.transcribe_buffer(audio_buffer)

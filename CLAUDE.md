@@ -66,12 +66,23 @@ WHISPER_MODEL=base
 PADC_BUFFER_SECONDS=30.0
 # Default: 30 seconds
 # Increase for longer continuous dictation without triggering transcription
+
+# Debug: Save audio buffers to WAV files for troubleshooting
+PADC_DEBUG_SAVE_AUDIO=true
+# When enabled, saves each buffer to debug_audio/ before transcription
+# Useful for verifying rolling buffer behavior and diagnosing truncation issues
 ```
 
 **Notes:**
 - `PADC_ADAPTER` is not used in new_daemon.py (GPU-only, no adapter selection)
 - The buffer is a rolling window - when it reaches the configured size, old audio is automatically discarded
 - The buffer does NOT clear between transcriptions, ensuring no audio is lost
+
+**Debug Audio Saving:**
+- When `PADC_DEBUG_SAVE_AUDIO=true`, each audio buffer is saved to `debug_audio/buffer_YYYYMMDD_HHMMSS_ffffff.wav`
+- Files are saved in a background thread to avoid blocking transcription
+- Useful for troubleshooting rolling buffer behavior, truncation issues, or VAD problems
+- **WARNING:** Files accumulate quickly - remember to clean `debug_audio/` periodically
 
 ## Architecture: daemon/new_daemon.py
 
@@ -164,6 +175,8 @@ def __init__(self, model_size: str = "base", max_context_words: int = 200):
 - Frequency, duration, envelope parameters are configurable
 
 ### Debugging
+
+#### General Debugging
 ```bash
 # Run in foreground to see all logs
 ./a
@@ -171,6 +184,48 @@ def __init__(self, model_size: str = "base", max_context_words: int = 200):
 # Or tail background logs
 tail -f /tmp/padc_daemon.log
 ```
+
+#### Debugging Audio Buffer Issues
+To troubleshoot rolling buffer behavior, truncation issues, or VAD problems:
+
+1. Enable debug audio saving in `.env`:
+```bash
+PADC_DEBUG_SAVE_AUDIO=true
+```
+
+2. Restart the daemon:
+```bash
+./a
+```
+
+3. Trigger transcriptions and check saved buffers:
+```bash
+# Buffers saved to debug_audio/ with timestamps
+ls -lh debug_audio/
+# Example: buffer_20251019_143022_123456.wav
+
+# Play back to verify audio content
+ffplay debug_audio/buffer_20251019_143022_123456.wav
+# or
+aplay debug_audio/buffer_20251019_143022_123456.wav
+```
+
+4. Analyze buffer properties:
+```bash
+# Check duration and sample rate
+ffprobe debug_audio/buffer_20251019_143022_123456.wav
+```
+
+5. Clean up when done:
+```bash
+rm -rf debug_audio/
+```
+
+**Implementation details:**
+- Saving happens in a background thread (`daemon/new_daemon.py:50-82`)
+- WAV files are 16kHz mono, int16 format
+- Files named with microsecond precision timestamps
+- Buffer is saved BEFORE transcription, so you can verify what Whisper receives
 
 ### GPU Troubleshooting
 
