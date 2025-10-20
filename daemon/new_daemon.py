@@ -47,6 +47,69 @@ class RecordingMode(Enum):
 # HELPER FUNCTIONS
 # ============================================================================
 
+def normalize_audio_buffer(audio_buffer: np.ndarray, target_level: float = 0.7) -> tuple[np.ndarray, dict]:
+    """Normalize audio buffer to target level with intelligent gain control
+
+    Args:
+        audio_buffer: numpy array of audio samples (float32, -1.0 to 1.0)
+        target_level: target peak level (0.0 to 1.0), 0.0 disables normalization
+
+    Returns:
+        tuple: (normalized_audio, info_dict) where info_dict contains normalization stats
+    """
+    if audio_buffer.size == 0 or target_level <= 0.0:
+        return audio_buffer, {'normalized': False}
+
+    # Flatten if needed
+    audio_flat = audio_buffer.flatten() if audio_buffer.ndim > 1 else audio_buffer
+
+    # Calculate RMS (root mean square) and peak levels
+    rms_level = np.sqrt(np.mean(audio_flat ** 2))
+    peak_level = np.abs(audio_flat).max()
+
+    # If audio is completely silent, don't normalize
+    if peak_level < 1e-6:
+        return audio_buffer, {
+            'normalized': False,
+            'reason': 'silent',
+            'peak_before': 0.0,
+            'rms_before': 0.0
+        }
+
+    # Calculate gain needed to reach target level
+    # Use peak-based normalization to prevent clipping
+    gain = target_level / peak_level
+
+    # Apply safety limit: don't amplify more than 20dB (10x)
+    # This prevents over-amplification of very quiet recordings
+    max_gain = 10.0
+    if gain > max_gain:
+        gain = max_gain
+
+    # Apply gain
+    normalized = audio_flat * gain
+
+    # Final safety check: hard clip at ±1.0 (should rarely trigger)
+    clipped = np.clip(normalized, -1.0, 1.0)
+    clipping_occurred = not np.array_equal(normalized, clipped)
+
+    # Reshape to original shape if needed
+    if audio_buffer.ndim > 1:
+        clipped = clipped.reshape(audio_buffer.shape)
+
+    return clipped, {
+        'normalized': True,
+        'gain_db': 20 * np.log10(gain) if gain > 0 else 0.0,
+        'gain_linear': gain,
+        'peak_before': float(peak_level),
+        'peak_after': float(np.abs(clipped).max()),
+        'rms_before': float(rms_level),
+        'rms_after': float(np.sqrt(np.mean(clipped.flatten() ** 2))),
+        'clipping_occurred': clipping_occurred,
+        'target_level': target_level
+    }
+
+
 def save_audio_buffer_to_wav(audio_buffer: np.ndarray, output_path: Path, sample_rate: int = 16000):
     """Save numpy audio buffer to WAV file in a separate thread
 
@@ -383,6 +446,13 @@ class PaDCDaemon:
         self.is_processing = False
         self.context_reset_timer = None
 
+        # Audio normalization configuration
+        self.normalize_target = float(os.environ.get("PADC_NORMALIZE_AUDIO", "0.7"))
+        if self.normalize_target > 0.0:
+            print(f"[{time.strftime('%H:%M:%S')}] Audio normalization enabled (target: {self.normalize_target:.1%})")
+        else:
+            print(f"[{time.strftime('%H:%M:%S')}] Audio normalization disabled (using raw levels)")
+
         # Debug audio saving configuration
         self.debug_save_audio = os.environ.get("PADC_DEBUG_SAVE_AUDIO", "false").lower() == "true"
         if self.debug_save_audio:
@@ -532,7 +602,12 @@ class PaDCDaemon:
                 print("... no audio captured", flush=True)
                 return
 
-            # Debug: Save audio buffer to WAV file if enabled
+            # Apply audio normalization if enabled
+            norm_info = {}
+            if self.normalize_target > 0.0:
+                audio_buffer, norm_info = normalize_audio_buffer(audio_buffer, self.normalize_target)
+
+            # Debug: Save audio buffer to WAV file if enabled (after normalization)
             if self.debug_save_audio:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 debug_wav_path = DEBUG_AUDIO_DIR / f"buffer_{timestamp}.wav"
@@ -557,6 +632,14 @@ class PaDCDaemon:
                 log_lines.append(f"\n[{timestamp}]")
                 log_lines.append(f"┌─ Transcription ({total_time:.2f}s)")
                 log_lines.append(f"│ Buffer: {info.get('buffer_duration', 0):.2f}s")
+
+                # Show normalization info if applied
+                if norm_info.get('normalized'):
+                    gain_db = norm_info.get('gain_db', 0)
+                    peak_before = norm_info.get('peak_before', 0)
+                    peak_after = norm_info.get('peak_after', 0)
+                    clipping = " [CLIPPED]" if norm_info.get('clipping_occurred') else ""
+                    log_lines.append(f"│ Gain: {gain_db:+.1f}dB (peak: {peak_before:.1%} → {peak_after:.1%}){clipping}")
 
                 if info.get('has_speech'):
                     log_lines.append(f"│ Speech: {info.get('speech_start', 0):.2f}s → {info.get('speech_end', 0):.2f}s")

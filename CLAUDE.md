@@ -67,6 +67,12 @@ PADC_BUFFER_SECONDS=30.0
 # Default: 30 seconds
 # Increase for longer continuous dictation without triggering transcription
 
+# Audio gain normalization (0.0 to 1.0)
+PADC_NORMALIZE_AUDIO=0.7
+# Default: 0.7 (70% peak level, leaves headroom to prevent clipping)
+# Set to 0.0 to disable and use raw microphone levels
+# Recommended: 0.6-0.8 for most microphones
+
 # Debug: Save audio buffers to WAV files for troubleshooting
 PADC_DEBUG_SAVE_AUDIO=true
 # When enabled, saves each buffer to debug_audio/ before transcription
@@ -78,8 +84,17 @@ PADC_DEBUG_SAVE_AUDIO=true
 - The buffer is a rolling window - when it reaches the configured size, old audio is automatically discarded
 - The buffer does NOT clear between transcriptions, ensuring no audio is lost
 
+**Audio Normalization:**
+- Automatically adjusts microphone gain to optimal levels for Whisper transcription
+- Uses peak-based normalization: analyzes buffer, calculates required gain, applies safely
+- Maximum amplification limited to 20dB (10x) to prevent over-amplification of very quiet audio
+- Hard clips at ±1.0 to prevent overflow (rare with proper target levels)
+- Gain information shown in transcription logs (e.g., "Gain: +12.5dB (peak: 15.3% → 70.0%)")
+- Set `PADC_NORMALIZE_AUDIO=0.0` to disable and use raw mic levels (not recommended)
+
 **Debug Audio Saving:**
 - When `PADC_DEBUG_SAVE_AUDIO=true`, each audio buffer is saved to `debug_audio/buffer_YYYYMMDD_HHMMSS_ffffff.wav`
+- Files are saved AFTER normalization, so you can verify what Whisper receives
 - Files are saved in a background thread to avoid blocking transcription
 - Useful for troubleshooting rolling buffer behavior, truncation issues, or VAD problems
 - **WARNING:** Files accumulate quickly - remember to clean `debug_audio/` periodically
@@ -169,9 +184,37 @@ Modify `max_context_words` in GPUWhisperModel init (line 132):
 def __init__(self, model_size: str = "base", max_context_words: int = 200):
 ```
 
+### Adjusting Audio Gain/Normalization
+The daemon automatically normalizes audio to optimal levels. To adjust:
+
+1. **Change target level** in `.env`:
+```bash
+PADC_NORMALIZE_AUDIO=0.7  # 70% peak level (default)
+# Try 0.6 for more headroom, 0.8 for louder audio
+```
+
+2. **Disable normalization** (use raw mic levels):
+```bash
+PADC_NORMALIZE_AUDIO=0.0
+```
+
+3. **Check gain in logs** - each transcription shows:
+```
+│ Gain: +12.5dB (peak: 15.3% → 70.0%)
+```
+- Positive dB = audio amplified
+- Negative dB = audio attenuated
+- "[CLIPPED]" warning = reduce target level
+
+4. **Implementation details:**
+- Normalization function: `normalize_audio_buffer()` (`daemon/new_daemon.py:50-110`)
+- Uses peak-based normalization to prevent clipping
+- Maximum gain limited to 20dB (10x) for safety
+- Applied before transcription and before saving debug audio
+
 ### Adjusting Audio Feedback
-- Start chime: `AudioRecorder.play_chime()` (lines 59-72)
-- Cancel sound: `AudioRecorder.play_cancel_sound()` (lines 74-89)
+- Start chime: `AudioRecorder.play_chime()` (lines 111-124)
+- Cancel sound: `AudioRecorder.play_cancel_sound()` (lines 126-141)
 - Frequency, duration, envelope parameters are configurable
 
 ### Debugging
