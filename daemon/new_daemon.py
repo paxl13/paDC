@@ -267,13 +267,14 @@ class AudioRecorder:
 class GPUWhisperModel:
     """Inline GPU-only Whisper model wrapper with contextual transcription"""
 
-    def __init__(self, model_size: str = "base", max_context_tokens: int = 200):
+    def __init__(self, model_size: str = "base", max_context_tokens: int = 200, language: str = "en"):
         self.model_size = model_size
         self.model = None
         self.device = "cuda"
         self.compute_type = "int8"
         self.context_tokens = []  # Store token IDs directly for efficiency
         self.max_context_tokens = max_context_tokens
+        self.language = language
         self.tokenizer = None
         self._initialize_model()
 
@@ -366,7 +367,7 @@ class GPUWhisperModel:
             segments, _ = self.model.transcribe(
                 audio_buffer,
                 beam_size=5,
-                language='en',
+                language=self.language,
                 condition_on_previous_text=True,
                 initial_prompt=context_text,
                 vad_filter=True,
@@ -573,7 +574,8 @@ class PaDCDaemon:
         self.is_processing = False
         self.context_reset_timer = None
         self.transcription_engine = "gpu"  # Default to GPU, can be "gpu" or "openai"
-        self.transcription_language = "en"  # Default to English
+        # Get language from environment or default to English
+        self.transcription_language = os.environ.get("PADC_LANGUAGE", "en")
 
         # Audio normalization configuration
         self.normalize_target = float(os.environ.get("PADC_NORMALIZE_AUDIO", "0.7"))
@@ -603,8 +605,9 @@ class PaDCDaemon:
         """Initialize both GPU and OpenAI Whisper models - runs once at startup"""
         # Initialize GPU model
         model_size = os.environ.get("PADC_MODEL", os.environ.get("WHISPER_MODEL", "base"))
-        print(f"[{time.strftime('%H:%M:%S')}] Loading GPU Whisper model ({model_size})...")
-        self.whisper_gpu = GPUWhisperModel(model_size=model_size)
+        gpu_language = os.environ.get("PADC_LANGUAGE", "en")
+        print(f"[{time.strftime('%H:%M:%S')}] Loading GPU Whisper model ({model_size}, language: {gpu_language})...")
+        self.whisper_gpu = GPUWhisperModel(model_size=model_size, language=gpu_language)
         print(f"[{time.strftime('%H:%M:%S')}] GPU Whisper model loaded successfully")
 
         # Initialize OpenAI model

@@ -62,6 +62,12 @@ PADC_MODEL=base
 # Alternative variable name (both work)
 WHISPER_MODEL=base
 
+# Language code for GPU transcription (ISO 639-1 format)
+PADC_LANGUAGE=en
+# Default: en (English)
+# Common options: en, fr, es, de, it, pt, ja, zh, etc.
+# This controls the language for GPU (Faster Whisper) transcription
+
 # Buffer size in seconds (rolling window of audio kept in memory)
 PADC_BUFFER_SECONDS=30.0
 # Default: 30 seconds
@@ -143,15 +149,15 @@ The `process_text()` method (lines 313-329) fixes common Whisper mistakes:
 
 Add new replacements to the `replacements` dict.
 
-### Transcription Parameters (lines 216-226)
+### Transcription Parameters (lines 367-377)
 
 ```python
 self.model.transcribe(
     audio_buffer,
-    language='en',                      # English only
+    language=self.language,             # Configurable via PADC_LANGUAGE (default: 'en')
     beam_size=5,
     condition_on_previous_text=True,    # Use prior segments
-    initial_prompt=context_text,        # 200-word context
+    initial_prompt=context_text,        # Context (token-limited)
     vad_filter=True,                    # Voice activity detection
     vad_parameters=dict(
         min_silence_duration_ms=500     # 500ms silence detection
