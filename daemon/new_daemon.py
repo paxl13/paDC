@@ -43,6 +43,7 @@ class RecordingMode(Enum):
     NORMAL = "normal"  # Only used for cancel
     INSERT = "insert"  # Paste with Shift+Insert
     INSERT_CONTINUE = "insert_continue"  # Paste with Shift+Insert, then auto-restart
+    CLAUDE_SEND = "claude_send"  # Send to Claude via claude-send-active script
 
 
 # ============================================================================
@@ -267,13 +268,14 @@ class AudioRecorder:
 class GPUWhisperModel:
     """Inline GPU-only Whisper model wrapper with contextual transcription"""
 
-    def __init__(self, model_size: str = "base", max_context_tokens: int = 200, language: str = "en"):
+    def __init__(self, model_size: str = "base", max_context_tokens: int = 200, silence_cutoff_seconds: float = 20.0, language: str = "en"):
         self.model_size = model_size
         self.model = None
         self.device = "cuda"
         self.compute_type = "int8"
         self.context_tokens = []  # Store token IDs directly for efficiency
         self.max_context_tokens = max_context_tokens
+        self.silence_cutoff_seconds = silence_cutoff_seconds
         self.language = language
         self.tokenizer = None
         self._initialize_model()
@@ -364,10 +366,14 @@ class GPUWhisperModel:
                 context_text = self.tokenizer.decode(self.context_tokens, skip_special_tokens=True)
 
             # Transcribe directly from buffer with context
-            segments, _ = self.model.transcribe(
+            lang = None
+            if self.language != "auto":
+                lang = self.language
+
+            segments, whisper_info = self.model.transcribe(
                 audio_buffer,
                 beam_size=5,
-                language=self.language,
+                language=lang,
                 condition_on_previous_text=True,
                 initial_prompt=context_text,
                 vad_filter=True,
@@ -380,12 +386,44 @@ class GPUWhisperModel:
             new_text_words = []
             segments_list = list(segments)  # Force evaluation of generator
 
+            # Filter out old segments separated by large silence gaps
+            filtered_segments = []
+            filtered_reason = None
+            if len(segments_list) > 1 and self.silence_cutoff_seconds > 0:
+                # Analyze gaps between segments from newest to oldest
+                # NOTE: We use start-to-start gaps because VAD incorrectly sets segment.end
+                # to the start of the next segment (known faster-whisper issue)
+                for i in range(len(segments_list) - 1, 0, -1):
+                    current_seg = segments_list[i]
+                    prev_seg = segments_list[i - 1]
+
+                    # Calculate time gap between start of consecutive segments
+                    gap = current_seg.start - prev_seg.start
+
+                    if gap > self.silence_cutoff_seconds:
+                        # Found a large gap - discard all segments before this point
+                        filtered_segments = segments_list[:i]
+                        segments_list = segments_list[i:]
+                        filtered_reason = f"{gap:.1f}s gap between segments"
+                        break
+
             # Build info dict for logging
             info = {
                 'buffer_duration': audio_duration,
                 'context_tokens_before': context_tokens_count,
                 'has_speech': len(segments_list) > 0,
+                'language': whisper_info.language,
+                'language_probability': whisper_info.language_probability
             }
+
+            # Add filtered segment info if any were filtered
+            if filtered_segments:
+                info['filtered_segments'] = {
+                    'count': len(filtered_segments),
+                    'time_range': (filtered_segments[0].start, filtered_segments[-1].end),
+                    'reason': filtered_reason,
+                    'segments': [{'start': s.start, 'end': s.end, 'text': s.text} for s in filtered_segments]
+                }
 
             if segments_list:
                 first_segment = segments_list[0]
@@ -507,6 +545,9 @@ class OpenAIWhisperModel:
             start_time = time.time()
 
             # Build transcription parameters
+            if language == "auto":
+                language = ""
+
             transcribe_params = {
                 "model": self.model_name,
                 "file": wav_buffer,
@@ -589,6 +630,13 @@ class PaDCDaemon:
         if self.debug_save_audio:
             print(f"[{time.strftime('%H:%M:%S')}] Debug audio saving enabled -> {DEBUG_AUDIO_DIR}")
 
+        # Silence gap filtering configuration
+        self.silence_cutoff_seconds = float(os.environ.get("PADC_SILENCE_CUTOFF_SECONDS", "20.0"))
+        if self.silence_cutoff_seconds > 0:
+            print(f"[{time.strftime('%H:%M:%S')}] Silence gap filtering: {self.silence_cutoff_seconds:.1f}s threshold")
+        else:
+            print(f"[{time.strftime('%H:%M:%S')}] Silence gap filtering: disabled (keeping all segments)")
+
         # Initialize status file
         self._update_status_file()
 
@@ -607,7 +655,11 @@ class PaDCDaemon:
         model_size = os.environ.get("PADC_MODEL", os.environ.get("WHISPER_MODEL", "base"))
         gpu_language = os.environ.get("PADC_LANGUAGE", "en")
         print(f"[{time.strftime('%H:%M:%S')}] Loading GPU Whisper model ({model_size}, language: {gpu_language})...")
-        self.whisper_gpu = GPUWhisperModel(model_size=model_size, language=gpu_language)
+        self.whisper_gpu = GPUWhisperModel(
+            model_size=model_size,
+            silence_cutoff_seconds=self.silence_cutoff_seconds,
+            language=gpu_language
+        )
         print(f"[{time.strftime('%H:%M:%S')}] GPU Whisper model loaded successfully")
 
         # Initialize OpenAI model
@@ -811,7 +863,15 @@ class PaDCDaemon:
                     if info.get('has_speech'):
                         log_lines.append(f"│ Speech: {info.get('speech_start', 0):.2f}s → {info.get('speech_end', 0):.2f}s")
                         log_lines.append(f"│ VAD trimmed: {info.get('trimmed_start', 0):.2f}s (start), {info.get('trimmed_end', 0):.2f}s (end)")
+                        log_lines.append(f"│ Language: {info.get('language', '')} ({info.get('language_probability', 0)*100:.2f}%)")
                     log_lines.append(f"│ Context: {info.get('context_tokens_before', 0)} → {info.get('context_tokens_after', 0)} tokens")
+
+                # Show filtered segments if any were discarded
+                if info.get('filtered_segments'):
+                    filtered = info['filtered_segments']
+                    time_range = filtered['time_range']
+                    log_lines.append(f"│ ⚠ Filtered: {filtered['count']} segments ({time_range[0]:.2f}s-{time_range[1]:.2f}s) - {filtered['reason']}")
+
                 log_lines.append(f"│")
 
                 # Show segments if available
@@ -823,16 +883,22 @@ class PaDCDaemon:
                 log_lines.append(f"│ Result: {text}")
 
                 # Handle clipboard and insert modes
-                clipcontent = pyperclip.paste()
-                pyperclip.copy(text +  " ")
-
-                if recording_mode == RecordingMode.INSERT or recording_mode == RecordingMode.INSERT_CONTINUE:
-                    insert_method = self._insert_with_xdotool(text)
-                    time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
-                    pyperclip.copy(clipcontent)
-                    log_lines.append(f"└─ ✓ Pasted ({insert_method})")
+                if recording_mode == RecordingMode.CLAUDE_SEND:
+                    # CLAUDE_SEND mode: don't touch clipboard, just send to script
+                    insert_method = self._insert_with_claude_send(text)
+                    log_lines.append(f"└─ ✓ Sent to Claude ({insert_method})")
                 else:
-                    log_lines.append(f"└─ ✓ Copied to clipboard")
+                    # INSERT modes: copy to clipboard and paste
+                    clipcontent = pyperclip.paste()
+                    pyperclip.copy(text +  " ")
+
+                    if recording_mode == RecordingMode.INSERT or recording_mode == RecordingMode.INSERT_CONTINUE:
+                        insert_method = self._insert_with_xdotool(text)
+                        time.sleep(0.5)  # Wait before restoring clipboard to prevent race conditions
+                        pyperclip.copy(clipcontent)
+                        log_lines.append(f"└─ ✓ Pasted ({insert_method})")
+                    else:
+                        log_lines.append(f"└─ ✓ Copied to clipboard")
 
                 print("\n".join(log_lines), flush=True)
             else:
@@ -865,7 +931,7 @@ class PaDCDaemon:
             if has_marked_pane:
                 # Use tmux send-keys to marked pane (add trailing space)
                 subprocess.run(
-                    ["tmux", "send-keys", "-t", "{marked}", text],
+                    ["tmux", "send-keys", "-t", "{marked}", text + " "],
                     check=True,
                     capture_output=True,
                     text=True
@@ -883,6 +949,23 @@ class PaDCDaemon:
             print(f"[{time.strftime('%H:%M:%S')}] Command not found: {e}", flush=True)
             return "error"
 
+    def _insert_with_claude_send(self, text):
+        """Send text to Claude using claude-send-active script"""
+        try:
+            result = subprocess.run(
+                ["claude-send-active", text + " "],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            return "claude-send-active"
+        except subprocess.CalledProcessError as e:
+            print(f"[{time.strftime('%H:%M:%S')}] claude-send-active error: {e}", flush=True)
+            return "error"
+        except FileNotFoundError:
+            print(f"[{time.strftime('%H:%M:%S')}] claude-send-active not found in PATH", flush=True)
+            return "error"
+
     def insert(self):
         """Stop recording and insert (no toggle, no auto-restart)"""
         if self.state != State.RECORDING:
@@ -892,6 +975,15 @@ class PaDCDaemon:
         threading.Thread(target=self.recorder.play_cancel_sound).start()
 
         self.recording_mode = RecordingMode.INSERT
+        return self.stop_recording()
+
+    def claude_send(self):
+        """Stop recording and send to Claude (no toggle, no auto-restart)"""
+        if self.state != State.RECORDING:
+            return "not_recording"
+
+        # No audio notification for claude-send
+        self.recording_mode = RecordingMode.CLAUDE_SEND
         return self.stop_recording()
 
     def toggle_insert(self):
@@ -970,6 +1062,10 @@ class PaDCDaemon:
             self.transcription_engine = "gpu"
             self.transcription_language = "en"
             return self.toggle_insert_continue()
+        elif cmd == "claude-send":
+            self.transcription_engine = "gpu"
+            self.transcription_language = "en"
+            return self.claude_send()
 
         # French commands (use OpenAI)
         elif cmd == "insert-fr":
@@ -984,6 +1080,10 @@ class PaDCDaemon:
             self.transcription_engine = "openai"
             self.transcription_language = "fr"
             return self.toggle_insert_continue()
+        elif cmd == "claude-send-fr":
+            self.transcription_engine = "openai"
+            self.transcription_language = "fr"
+            return self.claude_send()
 
         # Context reset commands
         elif cmd == "reset-context":
@@ -1010,6 +1110,8 @@ class PaDCDaemon:
         if FIFO_PATH.exists():
             os.unlink(FIFO_PATH)
         os.mkfifo(FIFO_PATH)
+        # Set permissions to allow all users to write (666)
+        os.chmod(FIFO_PATH, 0o666)
 
         print(
             f"[{time.strftime('%H:%M:%S')}] paDC daemon started (PID: {os.getpid()})",

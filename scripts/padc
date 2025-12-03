@@ -21,7 +21,7 @@ fi
 
 # Send command to FIFO
 case "${1:-toggle}" in
-    start|stop|cancel|insert|toggle|toggle-paste|toggle-insert|toggle-insert-enter|toggle-insert-continue|toggle-insert-continue-fr)
+    start|stop|cancel|insert|toggle|toggle-paste|toggle-insert|toggle-insert-enter|toggle-insert-continue|toggle-insert-continue-fr|claude-send|claude-send-fr)
         echo "$1" > "$FIFO"
         ;;
     help|--help|-h)
@@ -35,9 +35,11 @@ case "${1:-toggle}" in
         echo "  toggle-insert    Toggle recording and paste with Shift+Insert"
         echo "  toggle-insert-enter  Toggle recording, paste with Shift+Insert, then Enter"
         echo "  toggle-insert-continue  Toggle recording, paste, then auto-restart for continuous dictation"
-        echo "  toggle-insert-continue-fr    Toggle recording and paste with Shift+Insert"
+        echo "  toggle-insert-continue-fr    Toggle recording and paste with Shift+Insert (French)"
+        echo "  claude-send      Stop recording and send to Claude via claude-send-active script"
+        echo "  claude-send-fr   Stop recording and send to Claude (French) via claude-send-active script"
         echo "  start            Start recording"
-        echo "  insert        Start recording"
+        echo "  insert           Stop recording and paste once"
         echo "  stop             Stop recording"
         echo "  cancel           Cancel current recording without transcribing"
         echo ""

@@ -45,6 +45,8 @@ uv run python daemon/new_daemon.py
 echo "insert" > /tmp/padc.fifo                    # Stop recording and paste once
 echo "toggle-insert" > /tmp/padc.fifo            # Toggle with insert mode
 echo "toggle-insert-continue" > /tmp/padc.fifo   # Toggle continuous mode
+echo "claude-send" > /tmp/padc.fifo              # Send to Claude via claude-send-active script
+echo "claude-send-fr" > /tmp/padc.fifo           # Send to Claude (French) via claude-send-active script
 echo "cancel" > /tmp/padc.fifo                   # Cancel without transcribing
 echo "reset-context" > /tmp/padc.fifo            # Clear transcription context
 echo "shutdown" > /tmp/padc.fifo                 # Stop daemon
@@ -139,6 +141,7 @@ PADC_DEBUG_SAVE_AUDIO=true
 - `NORMAL`: Copy to clipboard only
 - `INSERT`: Paste with Shift+Insert (one-shot)
 - `INSERT_CONTINUE`: Paste with Shift+Insert, then **auto-restart recording** for continuous dictation
+- `CLAUDE_SEND`: Send to Claude via `claude-send-active` script (doesn't touch clipboard)
 
 **Key detail:** INSERT_CONTINUE restarts recording BEFORE transcription completes (line 361), creating seamless continuous dictation with no gap.
 
@@ -149,7 +152,7 @@ The `process_text()` method (lines 313-329) fixes common Whisper mistakes:
 
 Add new replacements to the `replacements` dict.
 
-### Transcription Parameters (lines 367-377)
+### Transcription Parameters (lines 368-378)
 
 ```python
 self.model.transcribe(
@@ -284,11 +287,24 @@ If daemon exits with "ERROR: CUDA not available":
 3. Install CUDA/cuDNN if needed: `uv add torch`
 4. Check library path in `./a` script points to correct venv Python version
 
-## xdotool Integration
+## Insertion Methods
 
+### xdotool Integration
 Paste modes require `xdotool` (Linux X11 only):
 - `INSERT` mode: `xdotool key shift+Insert`
-- Clipboard saved/restored with 500ms delay (lines 433, 439) to prevent race conditions
+- Clipboard saved/restored with 500ms delay to prevent race conditions
+
+### tmux Integration
+When a marked pane exists, text is sent directly via:
+- `tmux send-keys -t {marked} "text "`
+- Bypasses clipboard entirely
+
+### Claude Send Integration
+`CLAUDE_SEND` mode calls external script:
+- `claude-send-active <text>`
+- Doesn't touch clipboard
+- Script must be in PATH
+- Use for custom integrations (e.g., window manager bindings)
 
 ## Implementation Notes
 
