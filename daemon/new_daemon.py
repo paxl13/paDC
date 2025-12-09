@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ultra-condensed paDC daemon - single file, dual-engine (GPU + OpenAI) buffer-based transcription"""
+"""Ultra-condensed paDC daemon - single file, GPU-only buffer-based transcription"""
 
 import os
 import sys
@@ -17,8 +17,6 @@ import pyperclip
 from dotenv import load_dotenv
 import sounddevice as sd
 import wave
-import io
-import tempfile
 
 load_dotenv()
 
@@ -268,14 +266,13 @@ class AudioRecorder:
 class GPUWhisperModel:
     """Inline GPU-only Whisper model wrapper with contextual transcription"""
 
-    def __init__(self, model_size: str = "base", max_context_tokens: int = 200, silence_cutoff_seconds: float = 20.0, language: str = "en"):
+    def __init__(self, model_size: str = "base", max_context_tokens: int = 200, language: str = "en"):
         self.model_size = model_size
         self.model = None
         self.device = "cuda"
         self.compute_type = "int8"
         self.context_tokens = []  # Store token IDs directly for efficiency
         self.max_context_tokens = max_context_tokens
-        self.silence_cutoff_seconds = silence_cutoff_seconds
         self.language = language
         self.tokenizer = None
         self._initialize_model()
@@ -386,27 +383,6 @@ class GPUWhisperModel:
             new_text_words = []
             segments_list = list(segments)  # Force evaluation of generator
 
-            # Filter out old segments separated by large silence gaps
-            filtered_segments = []
-            filtered_reason = None
-            if len(segments_list) > 1 and self.silence_cutoff_seconds > 0:
-                # Analyze gaps between segments from newest to oldest
-                # NOTE: We use start-to-start gaps because VAD incorrectly sets segment.end
-                # to the start of the next segment (known faster-whisper issue)
-                for i in range(len(segments_list) - 1, 0, -1):
-                    current_seg = segments_list[i]
-                    prev_seg = segments_list[i - 1]
-
-                    # Calculate time gap between start of consecutive segments
-                    gap = current_seg.start - prev_seg.start
-
-                    if gap > self.silence_cutoff_seconds:
-                        # Found a large gap - discard all segments before this point
-                        filtered_segments = segments_list[:i]
-                        segments_list = segments_list[i:]
-                        filtered_reason = f"{gap:.1f}s gap between segments"
-                        break
-
             # Build info dict for logging
             info = {
                 'buffer_duration': audio_duration,
@@ -415,15 +391,6 @@ class GPUWhisperModel:
                 'language': whisper_info.language,
                 'language_probability': whisper_info.language_probability
             }
-
-            # Add filtered segment info if any were filtered
-            if filtered_segments:
-                info['filtered_segments'] = {
-                    'count': len(filtered_segments),
-                    'time_range': (filtered_segments[0].start, filtered_segments[-1].end),
-                    'reason': filtered_reason,
-                    'segments': [{'start': s.start, 'end': s.end, 'text': s.text} for s in filtered_segments]
-                }
 
             if segments_list:
                 first_segment = segments_list[0]
@@ -472,133 +439,6 @@ class GPUWhisperModel:
 
 
 # ============================================================================
-# INLINE OPENAI WHISPER MODEL
-# ============================================================================
-
-class OpenAIWhisperModel:
-    """OpenAI Whisper API wrapper with contextual transcription"""
-
-    def __init__(self, model_name: str = "whisper-1", max_context_words: int = 200):
-        self.model_name = model_name
-        self.api_key = os.environ.get("OPENAI_API_KEY", "")
-        self.context_words = deque(maxlen=max_context_words)
-        self.max_context_words = max_context_words
-
-        if not self.api_key or self.api_key == "your_openai_api_key_here":
-            print(f"[{time.strftime('%H:%M:%S')}] WARNING: No valid OpenAI API key found")
-            print(f"[{time.strftime('%H:%M:%S')}] OpenAI transcription will not be available")
-            self.available = False
-        else:
-            print(f"[{time.strftime('%H:%M:%S')}] OpenAI Whisper API initialized ({model_name})")
-            self.available = True
-
-    def transcribe_buffer(self, audio_buffer: np.ndarray, language: str = "fr") -> tuple[str, dict]:
-        """Transcribe audio buffer using OpenAI API with contextual awareness
-
-        Args:
-            audio_buffer: numpy array of audio samples (float32, -1.0 to 1.0)
-            language: ISO 639-1 language code (default: 'fr' for French)
-
-        Returns:
-            tuple: (transcription_text, info_dict) where info_dict contains API info
-        """
-        if not self.available:
-            return "", {"error": "OpenAI API key not configured"}
-
-        if audio_buffer.size == 0:
-            return "", {}
-
-        try:
-            # Import here to avoid dependency if not using OpenAI
-            from openai import OpenAI
-
-            # Flatten to 1D if needed
-            if audio_buffer.ndim > 1:
-                audio_buffer = audio_buffer.flatten()
-
-            # Calculate audio duration
-            audio_duration = len(audio_buffer) / 16000  # 16kHz sample rate
-
-            # Prepare context from previous transcriptions
-            context_text = None
-            context_words_count = len(self.context_words)
-
-            if self.context_words:
-                context_text = " ".join(self.context_words)
-
-            # Convert numpy buffer to WAV file in memory
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, 'wb') as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 2 bytes for int16
-                wav_file.setframerate(16000)
-                # Convert float32 [-1.0, 1.0] to int16 [-32768, 32767]
-                audio_int16 = (audio_buffer * 32767).astype(np.int16)
-                wav_file.writeframes(audio_int16.tobytes())
-
-            # Reset buffer position for reading
-            wav_buffer.seek(0)
-            wav_buffer.name = "audio.wav"  # OpenAI API requires a filename
-
-            # Call OpenAI API
-            client = OpenAI(api_key=self.api_key)
-            start_time = time.time()
-
-            # Build transcription parameters
-            if language == "auto":
-                language = ""
-
-            transcribe_params = {
-                "model": self.model_name,
-                "file": wav_buffer,
-                "language": language,
-                "response_format": "text"
-            }
-
-            # Add context as prompt if available
-            if context_text:
-                transcribe_params["prompt"] = context_text
-
-            transcription = client.audio.transcriptions.create(**transcribe_params)
-
-            api_time = time.time() - start_time
-
-            # Extract text (OpenAI returns plain text with response_format="text")
-            text = transcription.strip() if isinstance(transcription, str) else ""
-
-            # Update context with new words
-            if text:
-                new_words = text.strip().split()
-                self.context_words.extend(new_words)
-
-            # Build info dict
-            info = {
-                'buffer_duration': audio_duration,
-                'context_words_before': context_words_count,
-                'context_words_after': len(self.context_words),
-                'api_time': api_time,
-                'engine': 'openai',
-                'language': language,
-                'has_speech': bool(text)
-            }
-
-            return text, info
-
-        except ImportError:
-            error_msg = "OpenAI package not installed. Run: uv add openai"
-            print(f"[{time.strftime('%H:%M:%S')}] ERROR: {error_msg}")
-            return "", {"error": error_msg}
-        except Exception as e:
-            error_msg = f"OpenAI API error: {e}"
-            print(f"[{time.strftime('%H:%M:%S')}] ERROR: {error_msg}")
-            return "", {"error": error_msg}
-
-    def reset_context(self):
-        """Clear context without restarting model"""
-        self.context_words.clear()
-
-
-# ============================================================================
 # MAIN DAEMON
 # ============================================================================
 
@@ -609,14 +449,10 @@ class PaDCDaemon:
         buffer_seconds = float(os.environ.get("PADC_BUFFER_SECONDS", "30.0"))
         self.recorder = AudioRecorder(buffer_seconds=buffer_seconds)
         self.whisper_gpu = None
-        self.whisper_openai = None
         self.running = True
         self.recording_mode = RecordingMode.NORMAL
         self.is_processing = False
         self.context_reset_timer = None
-        self.transcription_engine = "gpu"  # Default to GPU, can be "gpu" or "openai"
-        # Get language from environment or default to English
-        self.transcription_language = os.environ.get("PADC_LANGUAGE", "en")
 
         # Audio normalization configuration
         self.normalize_target = float(os.environ.get("PADC_NORMALIZE_AUDIO", "0.7"))
@@ -630,18 +466,11 @@ class PaDCDaemon:
         if self.debug_save_audio:
             print(f"[{time.strftime('%H:%M:%S')}] Debug audio saving enabled -> {DEBUG_AUDIO_DIR}")
 
-        # Silence gap filtering configuration
-        self.silence_cutoff_seconds = float(os.environ.get("PADC_SILENCE_CUTOFF_SECONDS", "20.0"))
-        if self.silence_cutoff_seconds > 0:
-            print(f"[{time.strftime('%H:%M:%S')}] Silence gap filtering: {self.silence_cutoff_seconds:.1f}s threshold")
-        else:
-            print(f"[{time.strftime('%H:%M:%S')}] Silence gap filtering: disabled (keeping all segments)")
-
         # Initialize status file
         self._update_status_file()
 
-        # Initialize both GPU and OpenAI Whisper models (heavy operation, done once at startup)
-        self._init_whisper_models()
+        # Initialize GPU Whisper model (heavy operation, done once at startup)
+        self._init_whisper_model()
 
         # Signal handlers
         signal.signal(signal.SIGTERM, lambda s, f: self.shutdown())
@@ -649,33 +478,22 @@ class PaDCDaemon:
 
         self.start_recording()
 
-    def _init_whisper_models(self):
-        """Initialize both GPU and OpenAI Whisper models - runs once at startup"""
-        # Initialize GPU model
+    def _init_whisper_model(self):
+        """Initialize GPU Whisper model - runs once at startup"""
         model_size = os.environ.get("PADC_MODEL", os.environ.get("WHISPER_MODEL", "base"))
         gpu_language = os.environ.get("PADC_LANGUAGE", "en")
         print(f"[{time.strftime('%H:%M:%S')}] Loading GPU Whisper model ({model_size}, language: {gpu_language})...")
         self.whisper_gpu = GPUWhisperModel(
             model_size=model_size,
-            silence_cutoff_seconds=self.silence_cutoff_seconds,
             language=gpu_language
         )
         print(f"[{time.strftime('%H:%M:%S')}] GPU Whisper model loaded successfully")
 
-        # Initialize OpenAI model
-        openai_model = os.environ.get("PADC_OPENAI_MODEL", "whisper-1")
-        print(f"[{time.strftime('%H:%M:%S')}] Initializing OpenAI Whisper API ({openai_model})...")
-        self.whisper_openai = OpenAIWhisperModel(model_name=openai_model)
-        if self.whisper_openai.available:
-            print(f"[{time.strftime('%H:%M:%S')}] OpenAI Whisper API ready")
-
     def _auto_reset_context(self):
-        """Auto-reset context after inactivity for both models"""
+        """Auto-reset context after inactivity"""
         if self.whisper_gpu:
             self.whisper_gpu.reset_context()
-        if self.whisper_openai:
-            self.whisper_openai.reset_context()
-        print(f"\n[{time.strftime('%H:%M:%S')}]\n┌─ Context Reset\n│ Reason: 1 minute inactivity\n└─ Both GPU and OpenAI contexts cleared", flush=True)
+        print(f"\n[{time.strftime('%H:%M:%S')}]\n┌─ Context Reset\n│ Reason: 1 minute inactivity\n└─ Context cleared", flush=True)
 
     def _start_context_reset_timer(self):
         """Start timer to auto-reset context after 1 minute of inactivity"""
@@ -778,11 +596,9 @@ class PaDCDaemon:
         # Clear the audio buffer without stopping recording
         self.recorder.audio_data.clear()
 
-        # Reset context immediately for both models
+        # Reset context immediately
         if self.whisper_gpu:
             self.whisper_gpu.reset_context()
-        if self.whisper_openai:
-            self.whisper_openai.reset_context()
 
         # Reset mode to normal
         self.recording_mode = RecordingMode.NORMAL
@@ -808,18 +624,8 @@ class PaDCDaemon:
                 debug_wav_path = DEBUG_AUDIO_DIR / f"buffer_{timestamp}.wav"
                 save_audio_buffer_to_wav(audio_buffer, debug_wav_path, sample_rate=16000)
 
-            # Select transcription engine and transcribe
-            if self.transcription_engine == "openai":
-                if not self.whisper_openai or not self.whisper_openai.available:
-                    print(f"\n[{time.strftime('%H:%M:%S')}] ERROR: OpenAI API not available, falling back to GPU", flush=True)
-                    text, info = self.whisper_gpu.transcribe_buffer(audio_buffer)
-                    info['engine'] = 'gpu_fallback'
-                else:
-                    text, info = self.whisper_openai.transcribe_buffer(audio_buffer, language=self.transcription_language)
-            else:
-                # Default to GPU
-                text, info = self.whisper_gpu.transcribe_buffer(audio_buffer)
-                info['engine'] = 'gpu'
+            # Transcribe with GPU
+            text, info = self.whisper_gpu.transcribe_buffer(audio_buffer)
 
             # Process text to fix common Whisper mistakes
             text = self.process_text(text)
@@ -836,15 +642,7 @@ class PaDCDaemon:
                 log_lines = []
                 log_lines.append(f"\n[{timestamp}]")
 
-                # Show engine used
-                engine = info.get('engine', 'gpu')
-                engine_label = engine.upper()
-                if engine == 'openai':
-                    engine_label = f"OpenAI ({info.get('language', 'auto')})"
-                elif engine == 'gpu_fallback':
-                    engine_label = "GPU (fallback)"
-
-                log_lines.append(f"┌─ Transcription [{engine_label}] ({total_time:.2f}s)")
+                log_lines.append(f"┌─ Transcription ({total_time:.2f}s)")
                 log_lines.append(f"│ Buffer: {info.get('buffer_duration', 0):.2f}s")
 
                 # Show normalization info if applied
@@ -855,22 +653,12 @@ class PaDCDaemon:
                     clipping = " [CLIPPED]" if norm_info.get('clipping_occurred') else ""
                     log_lines.append(f"│ Gain: {gain_db:+.1f}dB (peak: {peak_before:.1%} → {peak_after:.1%}){clipping}")
 
-                # Show engine-specific info
-                if engine == 'openai':
-                    log_lines.append(f"│ API time: {info.get('api_time', 0):.2f}s")
-                    log_lines.append(f"│ Context: {info.get('context_words_before', 0)} → {info.get('context_words_after', 0)} words")
-                else:
-                    if info.get('has_speech'):
-                        log_lines.append(f"│ Speech: {info.get('speech_start', 0):.2f}s → {info.get('speech_end', 0):.2f}s")
-                        log_lines.append(f"│ VAD trimmed: {info.get('trimmed_start', 0):.2f}s (start), {info.get('trimmed_end', 0):.2f}s (end)")
-                        log_lines.append(f"│ Language: {info.get('language', '')} ({info.get('language_probability', 0)*100:.2f}%)")
-                    log_lines.append(f"│ Context: {info.get('context_tokens_before', 0)} → {info.get('context_tokens_after', 0)} tokens")
-
-                # Show filtered segments if any were discarded
-                if info.get('filtered_segments'):
-                    filtered = info['filtered_segments']
-                    time_range = filtered['time_range']
-                    log_lines.append(f"│ ⚠ Filtered: {filtered['count']} segments ({time_range[0]:.2f}s-{time_range[1]:.2f}s) - {filtered['reason']}")
+                # Show speech info
+                if info.get('has_speech'):
+                    log_lines.append(f"│ Speech: {info.get('speech_start', 0):.2f}s → {info.get('speech_end', 0):.2f}s")
+                    log_lines.append(f"│ VAD trimmed: {info.get('trimmed_start', 0):.2f}s (start), {info.get('trimmed_end', 0):.2f}s (end)")
+                    log_lines.append(f"│ Language: {info.get('language', '')} ({info.get('language_probability', 0)*100:.2f}%)")
+                log_lines.append(f"│ Context: {info.get('context_tokens_before', 0)} → {info.get('context_tokens_after', 0)} tokens")
 
                 log_lines.append(f"│")
 
@@ -1026,74 +814,26 @@ class PaDCDaemon:
 
         sys.exit(0)
 
-    def reset_context(self, engine: str = "both"):
-        """Reset transcription context
-
-        Args:
-            engine: Which engine to reset - "both", "gpu", or "openai"
-        """
-        if engine == "both" or engine == "gpu":
-            if self.whisper_gpu:
-                self.whisper_gpu.reset_context()
-
-        if engine == "both" or engine == "openai":
-            if self.whisper_openai:
-                self.whisper_openai.reset_context()
-
-        if engine == "both":
-            return "context_reset_both"
-        else:
-            return f"context_reset_{engine}"
+    def reset_context(self):
+        """Reset transcription context"""
+        if self.whisper_gpu:
+            self.whisper_gpu.reset_context()
+        return "context_reset"
 
     def process_command(self, cmd):
-        """Process commands - English (GPU) and French (OpenAI) variants"""
+        """Process commands"""
         cmd = cmd.strip().lower()
 
-        # English commands (use GPU)
         if cmd == "insert":
-            self.transcription_engine = "gpu"
-            self.transcription_language = "en"
             return self.insert()
         elif cmd == "toggle-insert":
-            self.transcription_engine = "gpu"
-            self.transcription_language = "en"
             return self.toggle_insert()
         elif cmd == "toggle-insert-continue":
-            self.transcription_engine = "gpu"
-            self.transcription_language = "en"
             return self.toggle_insert_continue()
         elif cmd == "claude-send":
-            self.transcription_engine = "gpu"
-            self.transcription_language = "en"
             return self.claude_send()
-
-        # French commands (use OpenAI)
-        elif cmd == "insert-fr":
-            self.transcription_engine = "openai"
-            self.transcription_language = "fr"
-            return self.insert()
-        elif cmd == "toggle-insert-fr":
-            self.transcription_engine = "openai"
-            self.transcription_language = "fr"
-            return self.toggle_insert()
-        elif cmd == "toggle-insert-continue-fr":
-            self.transcription_engine = "openai"
-            self.transcription_language = "fr"
-            return self.toggle_insert_continue()
-        elif cmd == "claude-send-fr":
-            self.transcription_engine = "openai"
-            self.transcription_language = "fr"
-            return self.claude_send()
-
-        # Context reset commands
         elif cmd == "reset-context":
-            return self.reset_context("both")
-        elif cmd == "reset-context-gpu":
-            return self.reset_context("gpu")
-        elif cmd == "reset-context-openai":
-            return self.reset_context("openai")
-
-        # Other commands
+            return self.reset_context()
         elif cmd == "cancel":
             return self.cancel_recording()
         elif cmd == "shutdown":
