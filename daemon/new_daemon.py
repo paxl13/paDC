@@ -147,6 +147,152 @@ def save_audio_buffer_to_wav(audio_buffer: np.ndarray, output_path: Path, sample
 
 
 # ============================================================================
+# HARDWARE MICROPHONE GAIN CONTROLLER
+# ============================================================================
+
+class MicGainController:
+    """Adaptive hardware microphone gain control via PulseAudio/PipeWire"""
+
+    DEFAULT_INITIAL_GAIN = 50.0  # Start at 50% if no saved gain
+
+    def __init__(self, min_gain: float = 20, max_gain: float = 150, target_peak: float = 0.5, max_adjustment: float = 0.1):
+        self.min_gain = min_gain          # 20% minimum
+        self.max_gain = max_gain          # 150% maximum
+        self.target_peak = target_peak    # 0.5 (50%) target peak level
+        self.max_adjustment = max_adjustment  # 10% max adjustment per iteration
+        # Target window: 40% to 60% of target (0.8 to 1.2 ratio)
+        self.low_ratio = 0.8   # 40% of target
+        self.high_ratio = 1.2  # 60% of target (above this = 120% of 50% = 60%)
+        self.audio_system = self._detect_system()
+        self._init_gain()
+
+    def _detect_system(self) -> str | None:
+        """Detect available audio system (pactl or wpctl)"""
+        for cmd in ['pactl', 'wpctl']:
+            try:
+                subprocess.run([cmd, '--version'], capture_output=True, check=True)
+                return cmd
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+        return None
+
+    def _init_gain(self):
+        """Initialize gain: set to default 50% at startup"""
+        if not self.audio_system:
+            self.current_gain = None
+            return
+
+        # Always start at default gain (50%)
+        self.set_gain(self.DEFAULT_INITIAL_GAIN)
+        self.current_gain = self.DEFAULT_INITIAL_GAIN
+
+    def get_gain(self) -> float | None:
+        """Read current microphone gain from system"""
+        if not self.audio_system:
+            return None
+
+        try:
+            if self.audio_system == 'pactl':
+                result = subprocess.run(
+                    ['pactl', 'get-source-volume', '@DEFAULT_SOURCE@'],
+                    capture_output=True, text=True, check=True
+                )
+                # Parse: "Volume: front-left: 23456 / 36% / -26.58 dB, ..."
+                import re
+                match = re.search(r'(\d+)%', result.stdout)
+                if match:
+                    return float(match.group(1))
+            elif self.audio_system == 'wpctl':
+                result = subprocess.run(
+                    ['wpctl', 'get-volume', '@DEFAULT_AUDIO_SOURCE@'],
+                    capture_output=True, text=True, check=True
+                )
+                # Parse: "Volume: 0.36" or "Volume: 0.36 [MUTED]"
+                import re
+                match = re.search(r'[\d.]+', result.stdout)
+                if match:
+                    return float(match.group()) * 100.0
+        except Exception:
+            pass
+        return None
+
+    def set_gain(self, percent: float) -> bool:
+        """Set microphone hardware gain"""
+        if not self.audio_system:
+            return False
+
+        try:
+            if self.audio_system == 'pactl':
+                subprocess.run(
+                    ['pactl', 'set-source-volume', '@DEFAULT_SOURCE@', f'{percent:.0f}%'],
+                    check=True, capture_output=True
+                )
+            elif self.audio_system == 'wpctl':
+                linear = percent / 100.0
+                subprocess.run(
+                    ['wpctl', 'set-volume', '@DEFAULT_AUDIO_SOURCE@', f'{linear:.2f}'],
+                    check=True, capture_output=True
+                )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def adjust_for_peak(self, measured_peak: float) -> dict:
+        """Adjust hardware gain based on measured peak level (before normalization)
+
+        Target window: 40% to 60% of target peak (default: 20% to 30% absolute)
+        Adjustment is proportional to distance from window - farther = bigger adjustment
+
+        Args:
+            measured_peak: Peak audio level before normalization (0.0 to 1.0)
+
+        Returns:
+            dict with keys: adjusted, old_gain, new_gain, reason
+        """
+        if not self.audio_system or measured_peak < 1e-6:
+            return {'adjusted': False}
+
+        old_gain = self.current_gain if self.current_gain else self.get_gain()
+        if old_gain is None:
+            return {'adjusted': False}
+
+        new_gain = old_gain
+        reason = None
+
+        # Target window boundaries
+        low_threshold = self.target_peak * self.low_ratio    # 40% of target (0.2 if target=0.5)
+        high_threshold = self.target_peak * self.high_ratio  # 120% of target (0.6 if target=0.5)
+
+        if measured_peak < low_threshold:
+            # Peak too low → increase gain
+            # Calculate how far below threshold (as ratio)
+            # e.g., peak=0.1, threshold=0.2 → distance_ratio = 0.2/0.1 = 2.0
+            distance_ratio = low_threshold / measured_peak
+            # Adjustment scales with distance: farther = bigger adjustment
+            # distance_ratio of 2.0 → adjustment of ~10%, ratio of 4.0 → ~20%
+            adjustment_pct = min((distance_ratio - 1) * 0.1, self.max_adjustment)
+            adjustment = adjustment_pct * old_gain
+            new_gain = min(old_gain + adjustment, self.max_gain)
+            reason = f"peak bas ({measured_peak:.0%})"
+
+        elif measured_peak > high_threshold:
+            # Peak too high → decrease gain
+            # e.g., peak=0.9, threshold=0.6 → distance_ratio = 0.9/0.6 = 1.5
+            distance_ratio = measured_peak / high_threshold
+            adjustment_pct = min((distance_ratio - 1) * 0.1, self.max_adjustment)
+            adjustment = adjustment_pct * old_gain
+            new_gain = max(old_gain - adjustment, self.min_gain)
+            reason = f"peak haut ({measured_peak:.0%})"
+
+        if new_gain != old_gain:
+            if self.set_gain(new_gain):
+                self.current_gain = new_gain
+                return {'adjusted': True, 'old_gain': old_gain, 'new_gain': new_gain, 'reason': reason}
+
+        return {'adjusted': False}
+
+
+# ============================================================================
 # INLINE AUDIO RECORDER
 # ============================================================================
 
@@ -476,6 +622,21 @@ class PaDCDaemon:
         if self.debug_save_audio:
             print(f"[{time.strftime('%H:%M:%S')}] Debug audio saving enabled -> {DEBUG_AUDIO_DIR}")
 
+        # Hardware gain control configuration
+        self.hw_gain_enabled = os.environ.get("PADC_HW_GAIN_CONTROL", "true").lower() == "true"
+        self.mic_gain = None
+        if self.hw_gain_enabled:
+            self.mic_gain = MicGainController(
+                min_gain=float(os.environ.get("PADC_HW_GAIN_MIN", "20")),
+                max_gain=float(os.environ.get("PADC_HW_GAIN_MAX", "150")),
+                target_peak=float(os.environ.get("PADC_HW_GAIN_TARGET", "0.5"))
+            )
+            if self.mic_gain.audio_system:
+                print(f"[{time.strftime('%H:%M:%S')}] HW gain control: {self.mic_gain.audio_system}, current: {self.mic_gain.current_gain:.0f}%")
+            else:
+                print(f"[{time.strftime('%H:%M:%S')}] HW gain control: disabled (no pactl/wpctl)")
+                self.hw_gain_enabled = False
+
         # Initialize status file
         self._update_status_file()
 
@@ -576,21 +737,36 @@ class PaDCDaemon:
         return "processing"
 
     def cancel_recording(self):
-        """Drop audio buffer and reset context while continuing to record"""
+        """Drop audio buffer while continuing to record (keeps context)
+
+        Double-cancel within 1 second resets the transcription context.
+        """
         if self.state != State.RECORDING:
             return "not_recording"
 
-        # Clear the audio buffer without stopping recording
-        self.recorder.audio_data.clear()
+        current_time = time.time()
 
-        # Reset context immediately
+        # Check if this is a double-cancel (within 1 second of last cancel)
+        if hasattr(self, '_last_cancel_time') and (current_time - self._last_cancel_time) < 1.0:
+            # Double cancel: reset context
+            if self.whisper_gpu:
+                self.whisper_gpu.reset_context()
+            self._last_cancel_time = 0  # Reset to prevent triple-cancel
+            print(f"[{time.strftime('%H:%M:%S')}] Context reset (double-cancel)", flush=True)
+            return "buffer_cleared"
+
+        # Single cancel: clear buffer and reset detected language
+        self.recorder.audio_data.clear()
+        self._last_cancel_time = current_time
+
+        # Reset detected language (but keep context tokens)
         if self.whisper_gpu:
-            self.whisper_gpu.reset_context()
+            self.whisper_gpu.detected_language = None
 
         # Reset mode to normal
         self.recording_mode = RecordingMode.NORMAL
 
-        print(f"[{time.strftime('%H:%M:%S')}] Buffer cleared, context reset (still recording)", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] Buffer cleared (still recording)", flush=True)
         return "buffer_cleared"
 
     def _transcribe(self, audio_buffer, processing_start_time, recording_mode):
@@ -604,6 +780,11 @@ class PaDCDaemon:
             norm_info = {}
             if self.normalize_target > 0.0:
                 audio_buffer, norm_info = normalize_audio_buffer(audio_buffer, self.normalize_target)
+
+            # Adjust hardware gain based on peak before normalization
+            hw_gain_info = {}
+            if self.hw_gain_enabled and self.mic_gain and norm_info.get('peak_before'):
+                hw_gain_info = self.mic_gain.adjust_for_peak(norm_info['peak_before'])
 
             # Debug: Save audio buffer to WAV file if enabled (after normalization)
             if self.debug_save_audio:
@@ -639,6 +820,13 @@ class PaDCDaemon:
                     peak_after = norm_info.get('peak_after', 0)
                     clipping = " [CLIPPED]" if norm_info.get('clipping_occurred') else ""
                     log_lines.append(f"│ Gain: {gain_db:+.1f}dB (peak: {peak_before:.1%} → {peak_after:.1%}){clipping}")
+
+                # Show hardware gain adjustment if it occurred
+                if hw_gain_info.get('adjusted'):
+                    old_hw = hw_gain_info['old_gain']
+                    new_hw = hw_gain_info['new_gain']
+                    reason = hw_gain_info['reason']
+                    log_lines.append(f"│ HW Gain: {old_hw:.0f}% → {new_hw:.0f}% ({reason})")
 
                 # Show speech info
                 if info.get('has_speech'):
