@@ -452,7 +452,6 @@ class PaDCDaemon:
         self.running = True
         self.recording_mode = RecordingMode.NORMAL
         self.is_processing = False
-        self.context_reset_timer = None
 
         # Audio normalization configuration
         self.normalize_target = float(os.environ.get("PADC_NORMALIZE_AUDIO", "0.7"))
@@ -488,26 +487,6 @@ class PaDCDaemon:
             language=gpu_language
         )
         print(f"[{time.strftime('%H:%M:%S')}] GPU Whisper model loaded successfully")
-
-    def _auto_reset_context(self):
-        """Auto-reset context after inactivity"""
-        if self.whisper_gpu:
-            self.whisper_gpu.reset_context()
-        print(f"\n[{time.strftime('%H:%M:%S')}]\n┌─ Context Reset\n│ Reason: 1 minute inactivity\n└─ Context cleared", flush=True)
-
-    def _start_context_reset_timer(self):
-        """Start timer to auto-reset context after 1 minute of inactivity"""
-        if self.context_reset_timer:
-            self.context_reset_timer.cancel()
-        self.context_reset_timer = threading.Timer(60.0, self._auto_reset_context)
-        self.context_reset_timer.daemon = True
-        self.context_reset_timer.start()
-
-    def _cancel_context_reset_timer(self):
-        """Cancel context reset timer"""
-        if self.context_reset_timer:
-            self.context_reset_timer.cancel()
-            self.context_reset_timer = None
 
     def _update_status_file(self):
         """Update status file for tmux status bar"""
@@ -554,9 +533,6 @@ class PaDCDaemon:
         """Start recording audio"""
         if self.state == State.RECORDING:
             return "already_recording"
-
-        # Cancel context reset timer when starting to record
-        self._cancel_context_reset_timer()
 
         self.state = State.RECORDING
         self._update_status_file()
@@ -701,9 +677,6 @@ class PaDCDaemon:
         finally:
             self.is_processing = False
             self._update_status_file()
-            # Start context reset timer after every transcription
-            # Will be cancelled if user starts recording again within 1 minute
-            self._start_context_reset_timer()
 
     def _insert_with_xdotool(self, text):
         """Paste using tmux send-keys if marked pane exists, otherwise Shift+Insert"""
@@ -797,9 +770,6 @@ class PaDCDaemon:
         self.running = False
         if self.state == State.RECORDING:
             self.recorder.stop()
-
-        # Cancel context reset timer
-        self._cancel_context_reset_timer()
 
         # Cleanup
         if FIFO_PATH.exists():
