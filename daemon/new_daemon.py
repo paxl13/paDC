@@ -266,6 +266,9 @@ class AudioRecorder:
 class GPUWhisperModel:
     """Inline GPU-only Whisper model wrapper with contextual transcription"""
 
+    # Languages we trust for adaptive detection (others are likely false positives)
+    TRUSTED_LANGUAGES = {"en", "fr"}
+
     def __init__(self, model_size: str = "base", max_context_tokens: int = 200, language: str = "en"):
         self.model_size = model_size
         self.model = None
@@ -273,7 +276,8 @@ class GPUWhisperModel:
         self.compute_type = "int8"
         self.context_tokens = []  # Store token IDs directly for efficiency
         self.max_context_tokens = max_context_tokens
-        self.language = language
+        self.default_language = language  # Fallback language
+        self.detected_language = None  # Last detected trusted language
         self.tokenizer = None
         self._initialize_model()
 
@@ -362,10 +366,10 @@ class GPUWhisperModel:
                 # context_tokens is a list of token IDs (integers)
                 context_text = self.tokenizer.decode(self.context_tokens, skip_special_tokens=True)
 
-            # Transcribe directly from buffer with context
-            lang = None
-            if self.language != "auto":
-                lang = self.language
+            # Determine language hint: use last detected trusted language, or default
+            lang = self.detected_language if self.detected_language else self.default_language
+            if lang == "auto":
+                lang = None
 
             segments, whisper_info = self.model.transcribe(
                 audio_buffer,
@@ -383,13 +387,19 @@ class GPUWhisperModel:
             new_text_words = []
             segments_list = list(segments)  # Force evaluation of generator
 
+            # Update detected language if it's a trusted one (en/fr)
+            detected_lang = whisper_info.language
+            if detected_lang in self.TRUSTED_LANGUAGES:
+                self.detected_language = detected_lang
+
             # Build info dict for logging
             info = {
                 'buffer_duration': audio_duration,
                 'context_tokens_before': context_tokens_count,
                 'has_speech': len(segments_list) > 0,
-                'language': whisper_info.language,
-                'language_probability': whisper_info.language_probability
+                'language': detected_lang,
+                'language_probability': whisper_info.language_probability,
+                'language_hint': lang  # What we asked for
             }
 
             if segments_list:
@@ -434,8 +444,9 @@ class GPUWhisperModel:
             return "", {}
 
     def reset_context(self):
-        """Clear context without restarting model"""
+        """Clear context and detected language"""
         self.context_tokens = []
+        self.detected_language = None
 
 
 # ============================================================================
@@ -633,7 +644,10 @@ class PaDCDaemon:
                 if info.get('has_speech'):
                     log_lines.append(f"│ Speech: {info.get('speech_start', 0):.2f}s → {info.get('speech_end', 0):.2f}s")
                     log_lines.append(f"│ VAD trimmed: {info.get('trimmed_start', 0):.2f}s (start), {info.get('trimmed_end', 0):.2f}s (end)")
-                    log_lines.append(f"│ Language: {info.get('language', '')} ({info.get('language_probability', 0)*100:.2f}%)")
+                    lang_hint = info.get('language_hint', '?')
+                    lang_detected = info.get('language', '?')
+                    lang_prob = info.get('language_probability', 0) * 100
+                    log_lines.append(f"│ Language: {lang_hint} → {lang_detected} ({lang_prob:.0f}%)")
                 log_lines.append(f"│ Context: {info.get('context_tokens_before', 0)} → {info.get('context_tokens_after', 0)} tokens")
 
                 log_lines.append(f"│")
@@ -841,7 +855,7 @@ class PaDCDaemon:
                             break
 
                         response = self.process_command(line)
-                        if response and response not in ["recording_started", "processing", "recording_cancelled"]:
+                        if response and response not in ["recording_started", "processing", "recording_cancelled", "buffer_cleared"]:
                             # Only print non-recording status messages since those are handled inline
                             print(
                                 f"[{time.strftime('%H:%M:%S')}] {response}",
