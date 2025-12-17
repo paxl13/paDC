@@ -863,11 +863,6 @@ class PaDCDaemon:
             if self.normalize_target > 0.0:
                 audio_buffer, norm_info = normalize_audio_buffer(audio_buffer, self.normalize_target)
 
-            # Adjust hardware gain based on peak before normalization
-            hw_gain_info = {}
-            if self.hw_gain_enabled and self.mic_gain and norm_info.get('peak_before'):
-                hw_gain_info = self.mic_gain.adjust_for_peak(norm_info['peak_before'])
-
             # Debug: Save audio buffer to WAV file if enabled (after normalization)
             if self.debug_save_audio:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -886,6 +881,11 @@ class PaDCDaemon:
             if text:
                 # Log transcription to file
                 self._log_transcription(text)
+
+                # Adjust hardware gain only when speech was detected
+                hw_gain_info = {}
+                if self.hw_gain_enabled and self.mic_gain and norm_info.get('peak_before'):
+                    hw_gain_info = self.mic_gain.adjust_for_peak(norm_info['peak_before'])
 
                 # Display consolidated transcription info
                 timestamp = time.strftime('%H:%M:%S')
