@@ -350,6 +350,26 @@ class AudioRecorder:
         sd.play(cancel_sound, self.sample_rate)
         sd.wait()  # Wait for the sound to finish
 
+    def play_realtime_on_chime(self):
+        """Double beep ascendant pour indiquer activation real-time"""
+        duration = 0.1
+        for freq in [440, 660]:  # A4 -> E5 (quinte ascendante)
+            t = np.linspace(0, duration, int(self.sample_rate * duration))
+            envelope = np.exp(-5 * t)
+            tone = envelope * np.sin(2 * np.pi * freq * t) * 0.2
+            sd.play(tone, self.sample_rate)
+            sd.wait()
+
+    def play_realtime_off_chime(self):
+        """Double beep descendant pour indiquer désactivation"""
+        duration = 0.1
+        for freq in [660, 440]:  # E5 -> A4 (quinte descendante)
+            t = np.linspace(0, duration, int(self.sample_rate * duration))
+            envelope = np.exp(-5 * t)
+            tone = envelope * np.sin(2 * np.pi * freq * t) * 0.2
+            sd.play(tone, self.sample_rate)
+            sd.wait()
+
     def start(self, play_chime=True):
         self.recording = True
         self.audio_data.clear()
@@ -622,6 +642,16 @@ class PaDCDaemon:
         if self.debug_save_audio:
             print(f"[{time.strftime('%H:%M:%S')}] Debug audio saving enabled -> {DEBUG_AUDIO_DIR}")
 
+        # Real-time mode configuration
+        self.realtime_mode = False
+        self.realtime_thread = None
+        self.last_speech_time = None
+        self.last_transcription_time = None
+        self.has_speech_since_last_transcription = False  # Track if we have speech to transcribe
+        self.realtime_silence_threshold = float(os.environ.get("PADC_REALTIME_SILENCE_THRESHOLD", "5.0"))
+        self.realtime_max_interval = float(os.environ.get("PADC_REALTIME_MAX_INTERVAL", "20.0"))
+        self.silence_rms_threshold = float(os.environ.get("PADC_SILENCE_RMS_THRESHOLD", "0.01"))
+
         # Hardware gain control configuration
         self.hw_gain_enabled = os.environ.get("PADC_HW_GAIN_CONTROL", "true").lower() == "true"
         self.mic_gain = None
@@ -665,6 +695,8 @@ class PaDCDaemon:
         try:
             if self.is_processing:
                 status = "#[bg=yellow]process#[default]"
+            elif self.realtime_mode:
+                status = "#[bg=green]realtime#[default]"
             elif self.state == State.RECORDING:
                 status = "online"
             else:
@@ -744,6 +776,11 @@ class PaDCDaemon:
         if self.state != State.RECORDING:
             return "not_recording"
 
+        # Auto-disable realtime mode
+        if self.realtime_mode:
+            self.realtime_mode = False
+            self._update_status_file()
+
         current_time = time.time()
 
         # Check if this is a double-cancel (within 1 second of last cancel)
@@ -768,6 +805,51 @@ class PaDCDaemon:
 
         print(f"[{time.strftime('%H:%M:%S')}] Buffer cleared (still recording)", flush=True)
         return "buffer_cleared"
+
+    def _realtime_monitor_thread(self):
+        """Monitor audio buffer for silence or max interval trigger"""
+        while self.realtime_mode and self.running:
+            time.sleep(0.5)
+
+            if not self.recorder.audio_data or self.is_processing:
+                continue
+
+            current_time = time.time()
+
+            # Analyser les derniers chunks pour silence
+            recent_chunks = list(self.recorder.audio_data)[-10:]  # ~0.6s de données
+            if recent_chunks:
+                combined = np.concatenate(recent_chunks)
+                rms = np.sqrt(np.mean(combined ** 2))
+                is_silent = rms < self.silence_rms_threshold
+
+                if is_silent:
+                    silence_duration = current_time - self.last_speech_time if self.last_speech_time else 0
+                    # Check si silence dure assez longtemps ET qu'on a de la parole à transcrire
+                    if self.has_speech_since_last_transcription and self.last_speech_time and silence_duration >= self.realtime_silence_threshold:
+                        self._trigger_realtime_transcription(f"silence ({silence_duration:.1f}s)")
+                else:
+                    # Speech detected - reset silence countdown and mark that we have speech
+                    self.last_speech_time = current_time
+                    self.has_speech_since_last_transcription = True
+
+            # Check max interval
+            if self.last_transcription_time:
+                interval = current_time - self.last_transcription_time
+                if interval >= self.realtime_max_interval:
+                    self._trigger_realtime_transcription(f"max interval ({interval:.1f}s)")
+
+    def _trigger_realtime_transcription(self, reason: str = "manual"):
+        """Trigger transcription in real-time mode (silent, CLAUDE_SEND)"""
+        if self.is_processing:
+            return  # Already processing, skip
+
+        print(f"[{time.strftime('%H:%M:%S')}] Realtime trigger: {reason}", flush=True)
+        self.last_transcription_time = time.time()
+        self.last_speech_time = time.time()  # Reset speech time too
+        self.has_speech_since_last_transcription = False  # Reset - need new speech before triggering again
+        self.recording_mode = RecordingMode.CLAUDE_SEND
+        self.stop_recording()
 
     def _transcribe(self, audio_buffer, processing_start_time, recording_mode):
         """Transcribe audio in background thread - direct buffer transcription"""
@@ -934,6 +1016,11 @@ class PaDCDaemon:
         if self.state != State.RECORDING:
             return "not_recording"
 
+        # Auto-disable realtime mode
+        if self.realtime_mode:
+            self.realtime_mode = False
+            self._update_status_file()
+
         # Play cancel sound in a separate thread to not block
         threading.Thread(target=self.recorder.play_cancel_sound).start()
 
@@ -952,11 +1039,23 @@ class PaDCDaemon:
     def toggle_insert(self):
         """Toggle recording with insert mode"""
         self.recording_mode = RecordingMode.INSERT
+
+        # Auto-disable realtime mode
+        if self.realtime_mode:
+            self.realtime_mode = False
+            self._update_status_file()
+
         return self.toggle()
 
     def toggle_insert_continue(self):
         """Toggle recording with insert-continue mode"""
         self.recording_mode = RecordingMode.INSERT_CONTINUE
+
+        # Auto-disable realtime mode
+        if self.realtime_mode:
+            self.realtime_mode = False
+            self._update_status_file()
+
         return self.toggle()
 
     def toggle(self):
@@ -965,6 +1064,38 @@ class PaDCDaemon:
             return self.start_recording()
         else:
             return self.stop_recording()
+
+    def toggle_realtime(self):
+        """Toggle real-time transcription mode"""
+        if self.realtime_mode:
+            # Turn off
+            self.realtime_mode = False
+            if self.realtime_thread:
+                self.realtime_thread.join(timeout=1.0)
+                self.realtime_thread = None
+
+            # Trigger final transcription if there's speech in buffer
+            if self.has_speech_since_last_transcription and self.recorder.audio_data:
+                print(f"[{time.strftime('%H:%M:%S')}] Realtime trigger: toggle-off", flush=True)
+                self.recording_mode = RecordingMode.CLAUDE_SEND
+                self.stop_recording()
+
+            threading.Thread(target=self.recorder.play_realtime_off_chime).start()
+
+            print(f"[{time.strftime('%H:%M:%S')}] Real-time mode: OFF")
+        else:
+            # Turn on
+            self.realtime_mode = True
+            self.last_speech_time = time.time()
+            self.last_transcription_time = time.time()
+            self.has_speech_since_last_transcription = False  # Wait for speech before first trigger
+            self.realtime_thread = threading.Thread(target=self._realtime_monitor_thread, daemon=True)
+            self.realtime_thread.start()
+            threading.Thread(target=self.recorder.play_realtime_on_chime).start()
+            print(f"[{time.strftime('%H:%M:%S')}] Real-time mode: ON")
+
+        self._update_status_file()
+        return "realtime_on" if self.realtime_mode else "realtime_off"
 
     def shutdown(self):
         """Shutdown daemon"""
@@ -1004,6 +1135,8 @@ class PaDCDaemon:
             return self.toggle_insert_continue()
         elif cmd == "claude-send":
             return self.claude_send()
+        elif cmd == "toggle-realtime":
+            return self.toggle_realtime()
         elif cmd == "reset-context":
             return self.reset_context()
         elif cmd == "cancel":
