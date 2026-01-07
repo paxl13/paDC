@@ -780,6 +780,7 @@ class PaDCDaemon:
         if self.realtime_mode:
             self.realtime_mode = False
             self._update_status_file()
+            threading.Thread(target=self.recorder.play_realtime_off_chime).start()
 
         current_time = time.time()
 
@@ -1020,6 +1021,7 @@ class PaDCDaemon:
         if self.realtime_mode:
             self.realtime_mode = False
             self._update_status_file()
+            threading.Thread(target=self.recorder.play_realtime_off_chime).start()
 
         # Play cancel sound in a separate thread to not block
         threading.Thread(target=self.recorder.play_cancel_sound).start()
@@ -1044,6 +1046,7 @@ class PaDCDaemon:
         if self.realtime_mode:
             self.realtime_mode = False
             self._update_status_file()
+            threading.Thread(target=self.recorder.play_realtime_off_chime).start()
 
         return self.toggle()
 
@@ -1055,6 +1058,7 @@ class PaDCDaemon:
         if self.realtime_mode:
             self.realtime_mode = False
             self._update_status_file()
+            threading.Thread(target=self.recorder.play_realtime_off_chime).start()
 
         return self.toggle()
 
@@ -1086,6 +1090,13 @@ class PaDCDaemon:
         else:
             # Turn on
             self.realtime_mode = True
+
+            # Flush existing buffer if there's audio (transcribe before starting realtime monitor)
+            if self.recorder.audio_data:
+                print(f"[{time.strftime('%H:%M:%S')}] Realtime trigger: startup (flushing buffer)", flush=True)
+                self.recording_mode = RecordingMode.CLAUDE_SEND
+                self.stop_recording()
+
             self.last_speech_time = time.time()
             self.last_transcription_time = time.time()
             self.has_speech_since_last_transcription = False  # Wait for speech before first trigger
