@@ -24,7 +24,6 @@ load_dotenv()
 # Paths
 FIFO_PATH = Path("/tmp/padc.fifo")
 PID_FILE = Path("/tmp/padc_daemon.pid")
-LOG_FILE = Path("/tmp/padc_daemon.log")
 STATUS_FILE = Path.home() / ".padc_status"
 
 # Get project root (where the daemon script is located)
@@ -1398,26 +1397,6 @@ def main():
             sys.exit(1)
         except (ProcessLookupError, ValueError):
             PID_FILE.unlink()  # Clean up stale PID file
-
-    # Daemonize unless --foreground flag
-    if "--foreground" not in sys.argv:
-        # First fork
-        pid = os.fork()
-        if pid > 0:
-            print(f"Starting daemon (PID: {pid})")
-            sys.exit(0)
-
-        # New session
-        os.setsid()
-
-        # Second fork
-        pid = os.fork()
-        if pid > 0:
-            sys.exit(0)
-
-        # Redirect outputs with unbuffered mode (line buffering)
-        sys.stdout = open(LOG_FILE, "a", buffering=1)  # Line buffered
-        sys.stderr = sys.stdout
 
     daemon = PaDCDaemon()
     daemon.run()
