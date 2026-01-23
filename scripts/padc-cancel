@@ -1,3 +1,0 @@
-#!/bin/bash
-# Cancel current recording without transcribing
-echo "cancel" > /tmp/padc.fifo

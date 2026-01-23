@@ -1,3 +1,0 @@
-#!/bin/bash
-# Send French transcription to Claude via claude-send-active script
-echo "claude-send-fr" > /tmp/padc.fifo

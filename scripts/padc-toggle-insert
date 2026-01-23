@@ -1,4 +1,0 @@
-#!/bin/bash
-# Get the absolute path to the script's directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/pdc" toggle-insert
