@@ -8,6 +8,7 @@ import time
 import threading
 import queue
 import subprocess
+import re
 from pathlib import Path
 from enum import Enum
 from collections import deque
@@ -47,6 +48,107 @@ class RecordingMode(Enum):
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+# Whisper hallucination patterns - these are generated when there's no real speech
+# Patterns are compiled regex that match the ENTIRE transcription (after strip)
+HALLUCINATION_PATTERNS = [
+    # Sous-titrage patterns (French broadcast artifacts)
+    re.compile(r"^Sous-titrag.*", re.IGNORECASE),
+    re.compile(r"^Subtitles by.*", re.IGNORECASE),
+    re.compile(r"^Sous-titres par.*", re.IGNORECASE),
+
+    # YouTube-style closing phrases
+    re.compile(r"^Merci d'avoir regard[ée].*", re.IGNORECASE),
+    re.compile(r"^Thank you for watching.*", re.IGNORECASE),
+    re.compile(r"^Please subscribe.*", re.IGNORECASE),
+    re.compile(r"^N'oublie[sz]? pas de.*abonn.*", re.IGNORECASE),
+    re.compile(r"^Au revoir[\s!.]*$", re.IGNORECASE),
+
+    # Single word/short hallucinations (when alone)
+    re.compile(r"^you$", re.IGNORECASE),
+    re.compile(r"^Thank you\.?$", re.IGNORECASE),
+    re.compile(r"^Merci\.?$", re.IGNORECASE),
+
+    # Punctuation only
+    re.compile(r"^\.+$"),
+
+    # Onomatopoeias when they are the ENTIRE transcription
+    re.compile(r"^[MmHh]+\.?$"),           # Hmm, mmm, Mmmm, etc.
+    re.compile(r"^[Ee]+[Uu]?[Hh]+[Mm]*\.?$"),   # euh, ehm, euhm, ehhh
+    re.compile(r"^[Oo][Hh]\.?$"),           # Oh
+    re.compile(r"^[Aa][Hh]\.?$"),           # Ah
+    re.compile(r"^[Uu]+[Hh]+\.?$"),         # Uh, uhh
+]
+
+# Filler words/onomatopoeias to remove from within transcriptions
+# These patterns match words that should be stripped from the middle of sentences
+# Pattern matches word boundaries, optional punctuation after
+FILLER_WORDS_PATTERN = re.compile(
+    r'\b('
+    r'[Ee]+[Uu]+[Hh]+[Mm]*|'   # euh, euuh, euhm, euhhm
+    r'[Ee]+[Hh]+[Mm]+|'         # ehm, ehmm, ehhmm
+    r'[Hh]+[Mm]+|'              # hm, hmm, hmmm, Hmm
+    r'[Mm]+[Hh]+[Mm]*|'         # mhm, mmhm, mhmm
+    r'[Uu]+[Hh]+|'              # uh, uhh, uhhh
+    r'[Aa]+[Hh]+'               # ah, ahh (when used as filler)
+    r')\b'
+    r'[.,;:!?\s]*',             # Optional trailing punctuation and space
+    re.IGNORECASE
+)
+
+
+def remove_filler_words(text: str) -> tuple[str, str | None]:
+    """Remove filler words/onomatopoeias from transcription
+
+    Args:
+        text: Transcription text to clean
+
+    Returns:
+        Tuple of (cleaned_text, marked_text_for_log or None if no fillers removed)
+        marked_text_for_log shows [filler] where fillers were removed
+    """
+    if not text:
+        return text, None
+
+    # Check if there are any filler words
+    if not FILLER_WORDS_PATTERN.search(text):
+        return text, None
+
+    # Create marked version for logging (shows [filler] where fillers were)
+    marked = FILLER_WORDS_PATTERN.sub(r'[\1] ', text)
+    marked = re.sub(r'\s+', ' ', marked).strip()
+    marked = re.sub(r'^[,;:\s]+', '', marked)
+
+    # Create clean version for actual use
+    cleaned = FILLER_WORDS_PATTERN.sub(' ', text)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = re.sub(r'^[,;:\s]+', '', cleaned)
+
+    return cleaned, marked
+
+
+def is_hallucination(text: str) -> bool:
+    """Check if transcription is a known Whisper hallucination pattern
+
+    Args:
+        text: Transcription text to check
+
+    Returns:
+        True if the text matches a hallucination pattern, False otherwise
+    """
+    if not text:
+        return False
+
+    text_stripped = text.strip()
+    if not text_stripped:
+        return False
+
+    for pattern in HALLUCINATION_PATTERNS:
+        if pattern.match(text_stripped):
+            return True
+
+    return False
+
 
 def normalize_audio_buffer(audio_buffer: np.ndarray, target_level: float = 0.7) -> tuple[np.ndarray, dict]:
     """Normalize audio buffer to target level with intelligent gain control
@@ -356,6 +458,16 @@ class AudioRecorder:
         for freq in [440, 660]:  # A4 -> E5 (quinte ascendante)
             t = np.linspace(0, duration, int(self.sample_rate * duration))
             envelope = np.exp(-5 * t)
+            tone = envelope * np.sin(2 * np.pi * freq * t) * 0.2
+            sd.play(tone, self.sample_rate)
+            sd.wait()
+
+    def play_realtime_insert_on_chime(self):
+        """Triple beep rapide ascendant pour real-time INSERT mode"""
+        duration = 0.08
+        for freq in [523, 659, 784]:  # C5 -> E5 -> G5 (accord majeur ascendant)
+            t = np.linspace(0, duration, int(self.sample_rate * duration))
+            envelope = np.exp(-6 * t)
             tone = envelope * np.sin(2 * np.pi * freq * t) * 0.2
             sd.play(tone, self.sample_rate)
             sd.wait()
@@ -709,10 +821,21 @@ class PaDCDaemon:
         except Exception:
             pass  # Silently fail if can't write status file
 
-    def process_text(self, text: str) -> str:
-        """Process and correct commonly misheard words from Whisper"""
+    def process_text(self, text: str) -> tuple[str, str | None]:
+        """Process and correct commonly misheard words from Whisper
+
+        Returns:
+            Tuple of (processed_text, marked_text_for_log or None)
+            marked_text_for_log shows [] where fillers were removed
+        """
         if not text:
-            return text
+            return text, None
+
+        # First, remove filler words (euh, hmm, etc.)
+        processed, marked_text = remove_filler_words(text)
+
+        if not processed:
+            return processed, marked_text
 
         # Word replacement mappings for common Whisper mistakes
         replacements = {
@@ -720,12 +843,13 @@ class PaDCDaemon:
             "Cloud": "Claude",
         }
 
-        # Apply replacements (word boundary aware)
-        processed = text
+        # Apply replacements to both processed and marked text
         for wrong, correct in replacements.items():
             processed = processed.replace(wrong, correct)
+            if marked_text:
+                marked_text = marked_text.replace(wrong, correct)
 
-        return processed
+        return processed, marked_text
 
     def _log_transcription(self, text: str):
         """Log transcription to file with date and time"""
@@ -878,7 +1002,14 @@ class PaDCDaemon:
             text, info = self.whisper_gpu.transcribe_buffer(audio_buffer)
 
             # Process text to fix common Whisper mistakes
-            text = self.process_text(text)
+            text, marked_text = self.process_text(text)
+
+            # Check for hallucinations and filter them out
+            if text and is_hallucination(text):
+                timestamp = time.strftime('%H:%M:%S')
+                total_time = time.time() - processing_start_time
+                print(f"\n[{timestamp}]\n┌─ Hallucination filtered ({total_time:.2f}s)\n│ Buffer: {info.get('buffer_duration', 0):.2f}s\n└─ Ignored: \"{text}\"", flush=True)
+                return  # Don't process hallucinated text
 
             total_time = time.time() - processing_start_time
 
@@ -933,7 +1064,12 @@ class PaDCDaemon:
                         log_lines.append(f"│ [{seg['start']:.2f}s-{seg['end']:.2f}s]{seg['text']}")
 
                 log_lines.append(f"│")
-                log_lines.append(f"│ Result: {text}")
+
+                # Show result - use marked_text if fillers were removed to show [] inline
+                if marked_text:
+                    log_lines.append(f"│ Result: {marked_text}")
+                else:
+                    log_lines.append(f"│ Result: {text}")
 
                 # Handle clipboard and insert modes
                 if recording_mode == RecordingMode.CLAUDE_SEND:
@@ -1118,7 +1254,11 @@ class PaDCDaemon:
             self.has_speech_since_last_transcription = False  # Wait for speech before first trigger
             self.realtime_thread = threading.Thread(target=self._realtime_monitor_thread, daemon=True)
             self.realtime_thread.start()
-            threading.Thread(target=self.recorder.play_realtime_on_chime).start()
+            # Chime distinct pour INSERT vs CLAUDE_SEND
+            if mode == RecordingMode.INSERT:
+                threading.Thread(target=self.recorder.play_realtime_insert_on_chime).start()
+            else:
+                threading.Thread(target=self.recorder.play_realtime_on_chime).start()
             print(f"[{time.strftime('%H:%M:%S')}] Real-time mode: ON ({mode_name})")
 
         self._update_status_file()
@@ -1130,6 +1270,20 @@ class PaDCDaemon:
 
     def toggle_realtime_insert(self):
         """Toggle real-time transcription mode (INSERT - Shift+Insert)"""
+        return self._toggle_realtime_with_mode(RecordingMode.INSERT, "insert")
+
+    def toggle_realtime_clear(self):
+        """Clear buffer when activating real-time mode (CLAUDE_SEND)"""
+        if not self.realtime_mode:
+            self.recorder.audio_data.clear()
+            print(f"[{time.strftime('%H:%M:%S')}] Buffer cleared before realtime start", flush=True)
+        return self._toggle_realtime_with_mode(RecordingMode.CLAUDE_SEND, "claude")
+
+    def toggle_realtime_insert_clear(self):
+        """Clear buffer when activating real-time mode (INSERT)"""
+        if not self.realtime_mode:
+            self.recorder.audio_data.clear()
+            print(f"[{time.strftime('%H:%M:%S')}] Buffer cleared before realtime start", flush=True)
         return self._toggle_realtime_with_mode(RecordingMode.INSERT, "insert")
 
     def shutdown(self):
@@ -1174,6 +1328,10 @@ class PaDCDaemon:
             return self.toggle_realtime()
         elif cmd == "toggle-realtime-insert":
             return self.toggle_realtime_insert()
+        elif cmd == "toggle-realtime-clear":
+            return self.toggle_realtime_clear()
+        elif cmd == "toggle-realtime-insert-clear":
+            return self.toggle_realtime_insert_clear()
         elif cmd == "reset-context":
             return self.reset_context()
         elif cmd == "cancel":
